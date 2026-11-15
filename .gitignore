@@ -1,0 +1,11 @@
+@'
+.env
+.env.*
+!.env.example
+*.log
+*.db
+coverage.out
+dist/
+node_modules/
+.DS_Store
+'@ | Set-Content -Encoding utf8 .gitignore
