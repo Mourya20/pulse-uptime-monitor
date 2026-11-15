@@ -79,7 +79,7 @@ export async function onRequestGet(context) {
 
   const startTime = Date.now();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s probe timeout
+  const timeoutId = setTimeout(() => controller.abort(), 35000); // 35s probe timeout for cold-start tolerance
 
   try {
     const response = await fetch(parsedTarget.toString(), {
@@ -112,7 +112,7 @@ export async function onRequestGet(context) {
     return new Response(JSON.stringify({
       ok: true,
       statusCode: 0,
-      statusText: isTimeout ? 'Timeout (>10s)' : (err.message || 'Connection failed'),
+      statusText: isTimeout ? 'Timeout (>35s)' : (err.message || 'Connection failed'),
       isHealthy: false,
       latencyMs,
       error: err.message

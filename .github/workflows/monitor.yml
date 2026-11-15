@@ -2,8 +2,8 @@ name: Pulse Keep-Alive & Monitoring Runner
 
 on:
   schedule:
-    # Trigger every 5 minutes with a 2-minute offset (e.g. :02, :07, :12, :17...)
-    - cron: '2/5 * * * *'
+    # Trigger every 5 minutes on standard boundaries (:00, :05, :10, :15...)
+    - cron: '*/5 * * * *'
   workflow_dispatch:
   push:
     branches: [ main ]
