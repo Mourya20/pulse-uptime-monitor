@@ -71,7 +71,16 @@ In your repository under **Settings > Secrets and variables > Actions**, add:
   ```
   *(Note: If your database password contains special characters like `@`, URL-encode it as `%40`)*
 
-### 3. Local Development & Testing
+### 3. Cloudflare Pages Deployment (Multi-Device Login)
+To access your dashboard from any device (phone, laptop, tablet) without manually entering Supabase URLs or committing secrets to Git:
+1. In Cloudflare Pages, go to **Settings > Environment variables > Production**.
+2. Add your public Supabase client variables:
+   - **`SUPABASE_URL`**: `https://<your-project-id>.supabase.co`
+   - **`SUPABASE_ANON_KEY`**: `eyJhbGciOiJIUzI1NiIsIn...`
+3. Deploy the repository. When you open the dashboard on any device, the login modal will automatically appear with only **Email** and **Password** fields.
+*(Security: Data access is guarded by PostgreSQL Row Level Security (RLS). Only authenticated users with matching `auth.uid()` can view or modify records).*
+
+### 4. Local Development & Testing
 ```bash
 # Run automated tests
 go test -v ./...
