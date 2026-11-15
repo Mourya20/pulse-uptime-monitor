@@ -653,7 +653,13 @@
               const sec = diffSec % 60;
               intervalEl.textContent = `Next in ${min}m ${sec < 10 ? '0' : ''}${sec}s (every ${m.interval_minutes}m)`;
             } else {
-              intervalEl.textContent = `Checking soon… (every ${m.interval_minutes}m)`;
+              const overdueSec = Math.abs(diffSec);
+              if (overdueSec > 60) {
+                const overMin = Math.floor(overdueSec / 60);
+                intervalEl.textContent = `Awaiting runner · Overdue by ${overMin}m (every ${m.interval_minutes}m)`;
+              } else {
+                intervalEl.textContent = `Checking soon… (every ${m.interval_minutes}m)`;
+              }
             }
           }
         }
@@ -1048,7 +1054,25 @@
 
     // Last check card
     $('#d-lastcheck').textContent = formatTimeAgo(m.last_checked_at);
-    $('#d-interval').textContent = `Every ${m.interval_minutes}m`;
+    const nextCheckStr = m.next_check_at;
+    if (nextCheckStr) {
+      const diffSec = Math.floor((new Date(nextCheckStr).getTime() - Date.now()) / 1000);
+      if (diffSec > 0) {
+        const min = Math.floor(diffSec / 60);
+        const sec = diffSec % 60;
+        $('#d-interval').textContent = `Next in ${min}m ${sec < 10 ? '0' : ''}${sec}s (every ${m.interval_minutes}m)`;
+      } else {
+        const overdueSec = Math.abs(diffSec);
+        if (overdueSec > 60) {
+          const overMin = Math.floor(overdueSec / 60);
+          $('#d-interval').textContent = `Awaiting runner · Overdue by ${overMin}m (every ${m.interval_minutes}m)`;
+        } else {
+          $('#d-interval').textContent = `Checking soon… (every ${m.interval_minutes}m)`;
+        }
+      }
+    } else {
+      $('#d-interval').textContent = `Every ${m.interval_minutes}m`;
+    }
 
     // Window ranges: 24h, 7d, 30d
     const rangeMs = state.selectedRange === '30d' ? 30 * 86400000 :
@@ -1142,9 +1166,18 @@
     if (!monitor.last_checked_at && !hasAnyChecks) return 'Not checked yet';
     if (monitor.is_paused) return 'Paused';
 
-    const st = monitor.current_status || 'UP';
+    const st = getEffectiveStatus(monitor);
 
-    // 1. If currently DOWN, count duration since current outage started
+    // 1. If currently UNKNOWN / Stale
+    if (st === 'UNKNOWN') {
+      if (monitor.last_checked_at) {
+        const elapsedSec = Math.max(0, Math.floor((Date.now() - new Date(monitor.last_checked_at).getTime()) / 1000));
+        return `Awaiting runner · Last probe was ${formatDuration(elapsedSec)} ago`;
+      }
+      return 'Awaiting initial probe';
+    }
+
+    // 2. If currently DOWN, count duration since current outage started
     if (st === 'DOWN') {
       const activeInc = state.incidents.find(inc => inc.monitor_id === monitor.id && !inc.resolved_at);
       const startStr = activeInc ? activeInc.started_at : monitor.last_checked_at;

@@ -13,7 +13,7 @@ window.PULSE_CONFIG = {
   // Option B (Private Single-Tenant Dashboard):
   // You can set your Supabase project URL and anon public key below, OR configure
   // SUPABASE_URL and SUPABASE_ANON_KEY in your Cloudflare Pages dashboard environment variables.
-  supabaseUrl: '',
+  supabaseUrl: 'https://hsvudvpwmygahhxnilnt.supabase.co',
   supabaseAnonKey: ''
 };
 
