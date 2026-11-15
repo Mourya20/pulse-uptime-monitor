@@ -1,0 +1,5 @@
+# Mark design reference folder as documentation so it does not skew language stats
+design-reference/* linguist-documentation
+
+# Ensure migrations and code are detected
+migrations/*.sql linguist-detectable=true
