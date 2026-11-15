@@ -29,6 +29,16 @@ A lightweight, serverless HTTP keep-alive and uptime monitoring system. It pings
 
 ---
 
+## How It Works (Architecture)
+
+```
+GitHub Actions (Cron) ➔ Go Worker ➔ Probes Targets ➔ Supabase DB ➔ Cloudflare Pages
+```
+
+GitHub Actions triggers the compiled Go worker every 5 minutes. The worker acquires PostgreSQL advisory locks, claims due monitors, and probes target URLs to keep free-tier services awake. Results and latency metrics are saved to Supabase PostgreSQL, and rendered in real time on the Cloudflare Pages static dashboard with zero idle server costs.
+
+---
+
 ## Architecture & Tech Stack
 
 | Layer | Technology | Purpose |
