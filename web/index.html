@@ -8,7 +8,7 @@
   <meta http-equiv="Expires" content="0">
   <title>Pulse – Uptime Monitor</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
-  <link rel="stylesheet" href="css/style.css?v=1.1.0">
+  <link rel="stylesheet" href="css/style.css?v=1.2.0">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
@@ -84,8 +84,6 @@
           <h1 id="dname">Monitor</h1>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="btn p sm" id="btn-ping-now" title="Send an immediate keep-alive probe to this endpoint">⚡ Ping now</button>
-          <button class="btn sm" id="btn-seed-sample" title="Generate 24h sample checks to populate graphs and metrics">Generate 24h data</button>
           <div class="seg" id="rng">
             <button class="on" data-range="24h">24h</button>
             <button data-range="7d">7d</button>
@@ -301,14 +299,14 @@
 
         <div class="k">Default check interval</div>
         <select class="in" id="set-interval" style="width:100%">
-          <option value="5">5 minutes</option>
-          <option value="15" selected>15 minutes</option>
+          <option value="5" selected>5 minutes</option>
+          <option value="15">15 minutes</option>
           <option value="30">30 minutes</option>
         </select>
 
         <div class="k" style="margin-top:16px">Default request timeout</div>
-        <input class="in" id="set-timeout" type="number" min="5" max="120" value="90" style="width:100%">
-        <div class="sub">Timeout in seconds (5–120s)</div>
+        <input class="in" id="set-timeout" type="number" min="5" max="120" value="15" style="width:100%">
+        <div class="sub">Timeout in seconds (5–120s, default 15s)</div>
 
         <div class="k" style="margin-top:16px">Latency warning threshold</div>
         <input class="in" id="set-degraded" type="number" min="100" max="10000" value="1000" style="width:100%">
@@ -341,8 +339,6 @@
       <label>Check interval</label>
       <div class="interval-ctrl">
         <div class="interval-line" id="m-interval-seg">
-          <button type="button" data-val="1">1m</button>
-          <button type="button" data-val="3">3m</button>
           <button type="button" data-val="5" class="on">5m</button>
           <button type="button" data-val="10">10m</button>
           <button type="button" data-val="15">15m</button>
@@ -350,8 +346,8 @@
           <button type="button" data-val="60">1h</button>
         </div>
         <div class="interval-input-row">
-          <input class="in mono" id="m-interval" type="number" min="1" max="1440" value="5" placeholder="5">
-          <span class="sub">minutes</span>
+          <input class="in mono" id="m-interval" type="number" min="5" max="1440" value="5" placeholder="5">
+          <span class="sub">minutes (min 5m)</span>
         </div>
       </div>
       <label>Degraded latency threshold (ms)</label>
@@ -375,8 +371,6 @@
       <label>Check interval</label>
       <div class="interval-ctrl">
         <div class="interval-line" id="edit-interval-seg">
-          <button type="button" data-val="1">1m</button>
-          <button type="button" data-val="3">3m</button>
           <button type="button" data-val="5">5m</button>
           <button type="button" data-val="10">10m</button>
           <button type="button" data-val="15">15m</button>
@@ -384,8 +378,8 @@
           <button type="button" data-val="60">1h</button>
         </div>
         <div class="interval-input-row">
-          <input class="in mono" id="edit-interval" type="number" min="1" max="1440" value="5" placeholder="5">
-          <span class="sub">minutes</span>
+          <input class="in mono" id="edit-interval" type="number" min="5" max="1440" value="5" placeholder="5">
+          <span class="sub">minutes (min 5m)</span>
         </div>
       </div>
       <label>Degraded latency threshold (ms)</label>
@@ -466,7 +460,7 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="js/config.js?v=1.1.0"></script>
-  <script src="js/app.js?v=1.1.0"></script>
+  <script src="js/config.js?v=1.2.0"></script>
+  <script src="js/app.js?v=1.2.0"></script>
 </body>
 </html>

@@ -14,8 +14,8 @@
     incidents: [],
     maintenance: [],
     settings: {
-      default_interval_minutes: 15,
-      default_timeout_seconds: 90,
+      default_interval_minutes: 5,
+      default_timeout_seconds: 15,
       degraded_threshold_ms: 1000,
       dashboard_timezone: 'UTC'
     },
@@ -98,70 +98,80 @@
     return `${s}s`;
   }
 
-  // Calculate Duration-Weighted Availability for a Monitor within a Time Window
-  function calculateMonitorUptime(monitorId, windowMs) {
-    const now = Date.now();
-    const windowStart = now - windowMs;
+  // Helper: Merge overlapping intervals [startMs, endMs]
+  function mergeIntervals(ranges) {
+    if (!ranges || ranges.length === 0) return [];
+    const sorted = ranges.slice().sort((a, b) => a[0] - b[0]);
+    const merged = [sorted[0].slice()];
 
-    // Filter incidents for this monitor overlapping with [windowStart, now]
-    const relevantIncidents = state.incidents.filter(inc => {
-      if (inc.monitor_id !== monitorId) return false;
-      const s = new Date(inc.started_at).getTime();
-      const e = inc.resolved_at ? new Date(inc.resolved_at).getTime() : now;
-      return e >= windowStart && s <= now;
-    });
-
-    // Check maintenance windows
-    const relevantMaint = state.maintenance.filter(m => {
-      if (m.monitor_id && m.monitor_id !== monitorId) return false;
-      const s = new Date(m.start_time).getTime();
-      const e = new Date(m.end_time).getTime();
-      return e >= windowStart && s <= now;
-    });
-
-    // Sum maintenance duration within window
-    let totalMaintMs = 0;
-    relevantMaint.forEach(m => {
-      const s = Math.max(windowStart, new Date(m.start_time).getTime());
-      const e = Math.min(now, new Date(m.end_time).getTime());
-      if (e > s) totalMaintMs += (e - s);
-    });
-
-    const effectiveMonitoredMs = Math.max(1, windowMs - totalMaintMs);
-
-    // Sum outage duration within window (excluding maintenance periods)
-    let totalDownMs = 0;
-    relevantIncidents.forEach(inc => {
-      const s = Math.max(windowStart, new Date(inc.started_at).getTime());
-      const e = Math.min(now, inc.resolved_at ? new Date(inc.resolved_at).getTime() : now);
-      if (e > s) {
-        // Exclude maintenance overlap
-        let overlapWithMaint = 0;
-        relevantMaint.forEach(m => {
-          const ms = Math.max(s, new Date(m.start_time).getTime());
-          const me = Math.min(e, new Date(m.end_time).getTime());
-          if (me > ms) overlapWithMaint += (me - ms);
-        });
-        totalDownMs += Math.max(0, (e - s) - overlapWithMaint);
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = merged[merged.length - 1];
+      const curr = sorted[i];
+      if (curr[0] <= prev[1]) {
+        if (curr[1] > prev[1]) {
+          prev[1] = curr[1];
+        }
+      } else {
+        merged.push(curr.slice());
       }
+    }
+    return merged;
+  }
+
+  // Helper: Sum total duration of intervals
+  function sumIntervals(ranges) {
+    if (!ranges) return 0;
+    return ranges.reduce((acc, [s, e]) => acc + Math.max(0, e - s), 0);
+  }
+
+  // Helper: Subtract exclusion intervals from a list of intervals
+  function subtractIntervals(ranges, exclusions) {
+    let active = ranges.map(r => r.slice());
+
+    exclusions.forEach(([exS, exE]) => {
+      const nextActive = [];
+      active.forEach(([s, e]) => {
+        if (exE <= s || exS >= e) {
+          nextActive.push([s, e]);
+          return;
+        }
+        if (exS > s) {
+          nextActive.push([s, exS]);
+        }
+        if (exE < e) {
+          nextActive.push([exE, e]);
+        }
+      });
+      active = nextActive;
     });
 
-    totalDownMs = Math.min(effectiveMonitoredMs, totalDownMs);
-    const upMs = effectiveMonitoredMs - totalDownMs;
-    const uptimePct = ((upMs / effectiveMonitoredMs) * 100);
+    return active;
+  }
 
-    // Latency calculations from checks
-    const monChecks = state.checks.filter(c => {
-      if (c.monitor_id !== monitorId) return false;
-      const t = new Date(c.checked_at).getTime();
-      return t >= windowStart && t <= now && (c.status === 'UP' || c.status === 'DEGRADED');
-    });
+  // Calculate effective monitor status accounting for stale grace period
+  // Grace period = interval * 2 + 10 minutes (matching Go checker IsStale)
+  function getEffectiveStatus(m) {
+    if (!m) return 'UNKNOWN';
+    if (m.is_paused) return 'PAUSED';
+    if (!m.last_checked_at) return 'UNKNOWN';
 
+    const interval = m.interval_minutes || 5;
+    const graceMinutes = interval * 2 + 10;
+    const graceMs = graceMinutes * 60 * 1000;
+    const elapsedMs = Date.now() - new Date(m.last_checked_at).getTime();
+
+    if (elapsedMs > graceMs) {
+      return 'UNKNOWN'; // Probe missed beyond grace period -> Stale
+    }
+    return m.current_status || 'UNKNOWN';
+  }
+
+  // Calculate Duration-Weighted Availability for a Monitor within a Time Window
+  // Accurately accounts for maintenance windows (no double counting), outages,
+  // and unobserved/unknown periods.
+  function calculateMonitorUptime(monitorId, windowMs) {
     const m = state.monitors.find(mon => mon.id === monitorId);
-    const hasAnyChecks = state.checks.some(c => c.monitor_id === monitorId);
-    const isPending = !m?.last_checked_at && !hasAnyChecks;
-
-    if (isPending) {
+    if (!m) {
       return {
         uptimePct: null,
         downSec: 0,
@@ -174,46 +184,178 @@
       };
     }
 
-    // All checks for this monitor within window
-    const allChecksInWindow = state.checks.filter(c => {
-      if (c.monitor_id !== monitorId) return false;
-      const t = new Date(c.checked_at).getTime();
-      return t >= windowStart && t <= now;
-    });
+    const now = Date.now();
+    const rawWindowStart = now - windowMs;
+    const createdAtMs = m.created_at ? new Date(m.created_at).getTime() : now;
+    // Monitor did not exist before created_at
+    const windowStart = Math.max(rawWindowStart, createdAtMs);
+    const windowDuration = now - windowStart;
 
-    let calculatedUptime = uptimePct;
-    if (relevantIncidents.length === 0 && allChecksInWindow.length > 0) {
-      const successfulChecks = allChecksInWindow.filter(c => c.status === 'UP' || c.status === 'DEGRADED').length;
-      calculatedUptime = (successfulChecks / allChecksInWindow.length) * 100;
+    if (windowDuration <= 0) {
+      return {
+        uptimePct: null,
+        downSec: 0,
+        incidentCount: 0,
+        mtbfHours: -1,
+        avgLat: 0,
+        minLat: 0,
+        maxLat: 0,
+        hasData: false
+      };
     }
 
+    // 1. Maintenance intervals overlapping [windowStart, now]
+    const rawMaint = state.maintenance
+      .filter(mw => !mw.monitor_id || mw.monitor_id === monitorId)
+      .map(mw => [
+        Math.max(windowStart, new Date(mw.start_time).getTime()),
+        Math.min(now, new Date(mw.end_time).getTime())
+      ])
+      .filter(([s, e]) => e > s);
+
+    const mergedMaint = mergeIntervals(rawMaint);
+    const totalMaintMs = sumIntervals(mergedMaint);
+
+    // 2. Incident outage intervals overlapping [windowStart, now]
+    const relevantIncidents = state.incidents.filter(inc => {
+      if (inc.monitor_id !== monitorId) return false;
+      const s = new Date(inc.started_at).getTime();
+      const e = inc.resolved_at ? new Date(inc.resolved_at).getTime() : now;
+      return e > windowStart && s < now;
+    });
+
+    const rawIncRanges = relevantIncidents.map(inc => [
+      Math.max(windowStart, new Date(inc.started_at).getTime()),
+      Math.min(now, inc.resolved_at ? new Date(inc.resolved_at).getTime() : now)
+    ]).filter(([s, e]) => e > s);
+
+    const mergedIncRanges = mergeIntervals(rawIncRanges);
+    // Exclude maintenance overlap from downtime (planned maintenance is never outage downtime)
+    const effectiveDownRanges = subtractIntervals(mergedIncRanges, mergedMaint);
+    const totalDownMs = sumIntervals(effectiveDownRanges);
+
+    // 3. Observed checks within the window
+    const intervalMs = (m.interval_minutes || 5) * 60 * 1000;
+    const graceMs = ((m.interval_minutes || 5) * 2 + 10) * 60 * 1000;
+
+    const monChecks = state.checks
+      .filter(c => c.monitor_id === monitorId && c.checked_at)
+      .sort((a, b) => new Date(a.checked_at).getTime() - new Date(b.checked_at).getTime());
+
+    // If no checks ever recorded and never checked
+    if (monChecks.length === 0 && !m.last_checked_at) {
+      return {
+        uptimePct: null,
+        downSec: 0,
+        incidentCount: 0,
+        mtbfHours: -1,
+        avgLat: 0,
+        minLat: 0,
+        maxLat: 0,
+        hasData: false
+      };
+    }
+
+    // 4. Identify unobserved / unknown periods
+    const unobservedRanges = [];
+
+    if (monChecks.length === 0) {
+      if (m.last_checked_at) {
+        const lastT = new Date(m.last_checked_at).getTime();
+        if (now - lastT > graceMs) {
+          unobservedRanges.push([Math.max(windowStart, lastT + intervalMs), now]);
+        }
+      } else {
+        unobservedRanges.push([windowStart, now]);
+      }
+    } else {
+      // Gap from windowStart to first check
+      const firstCheckT = new Date(monChecks[0].checked_at).getTime();
+      if (firstCheckT - windowStart > graceMs) {
+        unobservedRanges.push([windowStart, Math.min(now, firstCheckT)]);
+      }
+
+      // Gaps between consecutive checks
+      for (let i = 0; i < monChecks.length - 1; i++) {
+        const t1 = new Date(monChecks[i].checked_at).getTime();
+        const t2 = new Date(monChecks[i + 1].checked_at).getTime();
+        if (t2 - t1 > graceMs) {
+          const gapStart = Math.max(windowStart, t1 + intervalMs);
+          const gapEnd = Math.min(now, t2);
+          if (gapEnd > gapStart) {
+            unobservedRanges.push([gapStart, gapEnd]);
+          }
+        }
+      }
+
+      // Gap from last check to now
+      const lastCheckT = new Date(monChecks[monChecks.length - 1].checked_at).getTime();
+      if (now - lastCheckT > graceMs) {
+        const gapStart = Math.max(windowStart, lastCheckT + intervalMs);
+        if (now > gapStart) {
+          unobservedRanges.push([gapStart, now]);
+        }
+      }
+    }
+
+    const mergedUnknown = mergeIntervals(unobservedRanges);
+    const effectiveUnknown = subtractIntervals(mergedUnknown, mergedMaint);
+    const totalUnknownMs = sumIntervals(effectiveUnknown);
+
+    // Monitored duration excludes maintenance and unobserved periods
+    const effectiveMonitoredMs = Math.max(0, windowDuration - totalMaintMs - totalUnknownMs);
+
+    if (effectiveMonitoredMs <= 0) {
+      return {
+        uptimePct: null,
+        downSec: Math.round(totalDownMs / 1000),
+        incidentCount: relevantIncidents.length,
+        mtbfHours: -1,
+        avgLat: 0,
+        minLat: 0,
+        maxLat: 0,
+        hasData: false
+      };
+    }
+
+    const clampedDownMs = Math.min(effectiveMonitoredMs, totalDownMs);
+    const upMs = Math.max(0, effectiveMonitoredMs - clampedDownMs);
+    const uptimePct = Math.round(((upMs / effectiveMonitoredMs) * 100) * 100) / 100;
+
+    // MTBF calculation
+    let mtbfHours = -1;
+    if (relevantIncidents.length > 0) {
+      mtbfHours = (upMs / 3600000) / relevantIncidents.length;
+      mtbfHours = Math.round(mtbfHours * 100) / 100;
+    }
+
+    // Latency calculation from successful checks in window
+    const checksInWindow = monChecks.filter(c => {
+      const t = new Date(c.checked_at).getTime();
+      return t >= windowStart && t <= now && (c.status === 'UP' || c.status === 'DEGRADED');
+    });
+
     let avgLat = 0, minLat = 0, maxLat = 0;
-    if (monChecks.length > 0) {
+    if (checksInWindow.length > 0) {
       minLat = Infinity;
       let sum = 0;
-      monChecks.forEach(c => {
+      checksInWindow.forEach(c => {
         sum += c.response_time_ms;
         if (c.response_time_ms < minLat) minLat = c.response_time_ms;
         if (c.response_time_ms > maxLat) maxLat = c.response_time_ms;
       });
-      avgLat = Math.round(sum / monChecks.length);
+      avgLat = Math.round(sum / checksInWindow.length);
     } else {
       minLat = 0;
     }
 
-    // MTBF
-    let mtbfHours = -1;
-    if (relevantIncidents.length > 0) {
-      mtbfHours = (upMs / 3600000) / relevantIncidents.length;
-    }
-
     return {
-      uptimePct: parseFloat(calculatedUptime.toFixed(2)),
-      downSec: Math.floor(totalDownMs / 1000),
+      uptimePct,
+      downSec: Math.round(clampedDownMs / 1000),
       incidentCount: relevantIncidents.length,
       mtbfHours,
       avgLat,
-      minLat,
+      minLat: minLat === Infinity ? 0 : minLat,
       maxLat,
       hasData: true
     };
@@ -457,19 +599,39 @@
           }
         }
       }
-
-      // 2. Check if any monitor is due for an automated keep-alive probe from this dashboard
-      const now = Date.now();
-      state.monitors.forEach(mon => {
-        if (!mon.is_paused && mon.next_check_at) {
-          const dueTime = new Date(mon.next_check_at).getTime();
-          // If due within 2s and hasn't been probed in the last 15s
-          if (now >= dueTime && (!mon.last_checked_at || (now - new Date(mon.last_checked_at).getTime() > 15000))) {
-            triggerManualPing(mon.id);
-          }
-        }
-      });
     }, 1000);
+  }
+
+  // Fetch complete paginated history for a monitor over its selected range
+  async function loadMonitorHistory(monitorId, rangeMs) {
+    if (!state.client) return;
+    const sinceIso = new Date(Date.now() - rangeMs).toISOString();
+
+    let allMonChecks = [];
+    let page = 0;
+    const pageSize = 1000;
+    let hasMore = true;
+
+    while (hasMore && page < 5) {
+      const { data, error } = await state.client
+        .from('checks')
+        .select('*')
+        .eq('monitor_id', monitorId)
+        .gte('checked_at', sinceIso)
+        .order('checked_at', { ascending: false })
+        .range(page * pageSize, (page + 1) * pageSize - 1);
+
+      if (error || !data || data.length === 0) break;
+      allMonChecks = allMonChecks.concat(data);
+      if (data.length < pageSize) {
+        hasMore = false;
+      } else {
+        page++;
+      }
+    }
+
+    const otherChecks = state.checks.filter(c => c.monitor_id !== monitorId);
+    state.checks = [...allMonChecks, ...otherChecks];
   }
 
   // Load all application data from Supabase
@@ -481,8 +643,8 @@
       const { data: setts } = await state.client.from('app_settings').select('*').limit(1);
       if (setts && setts.length > 0) {
         state.settings = { ...state.settings, ...setts[0] };
-        $('#set-interval').value = String(state.settings.default_interval_minutes || 15);
-        $('#set-timeout').value = String(state.settings.default_timeout_seconds || 90);
+        $('#set-interval').value = String(state.settings.default_interval_minutes || 5);
+        $('#set-timeout').value = String(state.settings.default_timeout_seconds || 15);
         $('#set-degraded').value = String(state.settings.degraded_threshold_ms || 1000);
         $('#set-tz').value = state.settings.dashboard_timezone || 'UTC';
       }
@@ -511,12 +673,14 @@
       if (maintErr) throw maintErr;
       state.maintenance = maints || [];
 
-      // 5. Fetch recent checks (last 1000)
+      // 5. Fetch recent checks (last 24 hours across fleet)
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600000).toISOString();
       const { data: chks, error: chkErr } = await state.client
         .from('checks')
         .select('*')
+        .gte('checked_at', twentyFourHoursAgo)
         .order('checked_at', { ascending: false })
-        .limit(1000);
+        .limit(5000);
       if (chkErr) throw chkErr;
       state.checks = chks || [];
 
@@ -526,8 +690,11 @@
       renderIncidents();
       renderMaintenance();
 
-      // If viewing detail, refresh detail view
+      // If viewing detail, refresh detail view with full monitor history
       if (state.currentMonitorId) {
+        const rangeMs = state.selectedRange === '30d' ? 30 * 86400000 :
+                        state.selectedRange === '7d' ? 7 * 86400000 : 86400000;
+        await loadMonitorHistory(state.currentMonitorId, rangeMs);
         renderMonitorDetail(state.currentMonitorId);
       }
     } catch (err) {
@@ -549,15 +716,16 @@
   // Render Fleet Overview
   function renderOverview() {
     const total = state.monitors.length;
-    let upCount = 0, downCount = 0, degradedCount = 0;
+    let upCount = 0, downCount = 0, degradedCount = 0, unknownCount = 0;
     let totalUptime = 0;
 
     let validUptimeCount = 0;
     state.monitors.forEach(m => {
-      const st = m.is_paused ? 'PAUSED' : (m.current_status || 'UNKNOWN');
+      const st = getEffectiveStatus(m);
       if (st === 'UP') upCount++;
       else if (st === 'DOWN') downCount++;
       else if (st === 'DEGRADED') degradedCount++;
+      else if (st === 'UNKNOWN') unknownCount++;
 
       const stats = calculateMonitorUptime(m.id, 86400000);
       if (stats.uptimePct !== null) {
@@ -583,6 +751,9 @@
     } else if (degradedCount > 0) {
       footDot.className = 'dot bgy';
       footText.textContent = 'Degraded performance';
+    } else if (unknownCount > 0) {
+      footDot.className = 'dot bgm';
+      footText.textContent = `${unknownCount} monitor${unknownCount > 1 ? 's' : ''} unknown/stale`;
     } else {
       footDot.className = 'dot bgg';
       footText.textContent = 'All systems operational';
@@ -594,11 +765,13 @@
       tb.innerHTML = '<tr><td colspan="6" class="sub" style="text-align:center;padding:32px">No monitors configured. Click "New monitor" to add one.</td></tr>';
     } else {
       tb.innerHTML = state.monitors.map((m, idx) => {
-        const stKey = m.is_paused ? 'PAUSED' : (m.current_status || 'UNKNOWN');
+        const stKey = getEffectiveStatus(m);
         const s = statusStyles[stKey] || statusStyles.UNKNOWN;
         const stats = calculateMonitorUptime(m.id, 86400000);
         const strip = generate24HourStrip(m.id);
         const host = formatHost(m.url);
+        const isStale = stKey === 'UNKNOWN' && m.last_checked_at;
+        const statusLabel = isStale ? 'Unknown (stale)' : s.text;
 
         return `
           <tr class="clk" data-id="${m.id}">
@@ -606,7 +779,7 @@
               <span class="dot ${s.bg}"></span><b>${escapeHtml(m.name || 'Unnamed')}</b>
               <span class="mono" style="color:var(--t3);margin-left:10px;font-size:13px">${escapeHtml(host)}</span>
             </td>
-            <td class="${s.cls}">${s.text}</td>
+            <td class="${s.cls}">${statusLabel}</td>
             <td class="mono">${stats.uptimePct !== null ? stats.uptimePct + '%' : '—'}</td>
             <td>
               <span class="mini">
@@ -657,11 +830,17 @@
   }
 
   // Open Monitor Detail View
-  function openMonitorDetail(monitorId) {
+  async function openMonitorDetail(monitorId) {
     state.currentMonitorId = monitorId;
     $('#overview').classList.add('det');
     renderMonitorDetail(monitorId);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // Load full history for this monitor's selected window
+    const rangeMs = state.selectedRange === '30d' ? 30 * 86400000 :
+                    state.selectedRange === '7d' ? 7 * 86400000 : 86400000;
+    await loadMonitorHistory(monitorId, rangeMs);
+    renderMonitorDetail(monitorId);
   }
 
   $('#back').onclick = () => {
@@ -680,11 +859,17 @@
   };
 
   // Range Selector Click in Detail View
-  $('#rng').addEventListener('click', e => {
+  $('#rng').addEventListener('click', async e => {
     if (e.target.tagName !== 'BUTTON') return;
     [...$('#rng').children].forEach(b => b.classList.toggle('on', b === e.target));
     state.selectedRange = e.target.dataset.range || '24h';
-    if (state.currentMonitorId) renderMonitorDetail(state.currentMonitorId);
+    if (state.currentMonitorId) {
+      renderMonitorDetail(state.currentMonitorId);
+      const rangeMs = state.selectedRange === '30d' ? 30 * 86400000 :
+                      state.selectedRange === '7d' ? 7 * 86400000 : 86400000;
+      await loadMonitorHistory(state.currentMonitorId, rangeMs);
+      renderMonitorDetail(state.currentMonitorId);
+    }
   });
 
   // Render Monitor Detail
@@ -695,13 +880,17 @@
     $('#dname').textContent = m.name;
     $('#d-chartsub').textContent = `All probes · ${formatHost(m.url)}`;
 
-    const stKey = m.is_paused ? 'PAUSED' : (m.current_status || 'UNKNOWN');
+    const stKey = getEffectiveStatus(m);
     const s = statusStyles[stKey] || statusStyles.UNKNOWN;
 
     // Status card
     const dStatus = $('#d-status');
     dStatus.className = 'v ' + s.cls;
-    dStatus.innerHTML = `<span class="dot ${s.bg}"></span>${s.text}`;
+    if (stKey === 'UNKNOWN' && m.last_checked_at) {
+      dStatus.innerHTML = `<span class="dot ${s.bg}"></span>Unknown (Stale)`;
+    } else {
+      dStatus.innerHTML = `<span class="dot ${s.bg}"></span>${s.text}`;
+    }
 
     // Calculate duration in current state
     const sinceText = calculateStateDurationText(m);
@@ -868,7 +1057,7 @@
     if (checksInRange.length === 0) {
       svg.innerHTML = `
         <text x="400" y="95" fill="#707070" text-anchor="middle" font-size="14">No response time data recorded yet</text>
-        <text x="400" y="125" fill="#a1a1a1" text-anchor="middle" font-size="12">Click "⚡ Ping now" or "Generate 24h data" above to populate dynamic charts</text>
+        <text x="400" y="125" fill="#a1a1a1" text-anchor="middle" font-size="12">Awaiting scheduled keep-alive probes from GitHub Actions</text>
       `;
       $('#ch-avg').textContent = '—';
       $('#ch-min').textContent = '—';
@@ -965,186 +1154,6 @@
     };
   }
 
-  // Trigger an immediate keep-alive probe from the browser
-  async function triggerManualPing(monitorId, btnElement = null) {
-    const m = state.monitors.find(mon => mon.id === monitorId);
-    if (!m) return;
-
-    const originalBtnText = btnElement ? btnElement.innerHTML : null;
-    if (btnElement) {
-      btnElement.disabled = true;
-      btnElement.innerHTML = '⚡ Pinging…';
-    }
-
-    const tStart = performance.now();
-    let status = 'UP';
-    let statusCode = 200;
-    let errorMessage = null;
-
-    try {
-      try {
-        const resp = await fetch(m.url, { method: 'GET', cache: 'no-store' });
-        statusCode = resp.status;
-        if (!resp.ok) {
-          status = 'DOWN';
-          errorMessage = `HTTP ${resp.status} ${resp.statusText || ''}`.trim();
-        }
-      } catch (corsOrNetErr) {
-        // Fallback to no-cors mode to measure network roundtrip and wake target keep-alive
-        await fetch(m.url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
-        statusCode = 200;
-      }
-    } catch (err) {
-      status = 'DOWN';
-      statusCode = 0;
-      errorMessage = err.message || 'Service unreachable';
-    }
-
-    const durationMs = Math.max(1, Math.round(performance.now() - tStart));
-    const threshold = m.degraded_threshold_ms || state.settings.degraded_threshold_ms || 1000;
-    if (status === 'UP' && durationMs > threshold) {
-      status = 'DEGRADED';
-    }
-
-    const checkedAt = new Date().toISOString();
-    const checkRecord = {
-      id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('chk-' + Date.now()),
-      monitor_id: monitorId,
-      user_id: state.user?.id,
-      checked_at: checkedAt,
-      status,
-      status_code: statusCode,
-      response_time_ms: durationMs,
-      error_message: errorMessage,
-      is_retry: false
-    };
-
-    // Prepend check to local state immediately for instant dynamic UI update
-    state.checks.unshift(checkRecord);
-    m.current_status = status;
-    m.last_checked_at = checkedAt;
-
-    // Persist to Supabase if connected
-    if (state.client && state.user) {
-      state.client.from('checks').insert({
-        monitor_id: monitorId,
-        user_id: state.user.id,
-        checked_at: checkedAt,
-        status,
-        status_code: statusCode,
-        response_time_ms: durationMs,
-        error_message: errorMessage,
-        is_retry: false
-      }).then(({ error }) => {
-        if (error) console.warn('Supabase check insert:', error.message);
-      });
-
-      await state.client.from('monitors').update({
-        current_status: status,
-        last_checked_at: checkedAt,
-        next_check_at: new Date(Date.now() + m.interval_minutes * 60000).toISOString()
-      }).eq('id', monitorId);
-    }
-
-    renderOverview();
-    renderMonitors();
-    if (state.currentMonitorId === monitorId) {
-      renderMonitorDetail(monitorId);
-    }
-
-    if (btnElement) {
-      btnElement.disabled = false;
-      btnElement.innerHTML = originalBtnText;
-    }
-
-    if (status === 'UP') {
-      showToast(`⚡ Probe succeeded: ${statusCode} OK in ${durationMs} ms`);
-    } else if (status === 'DEGRADED') {
-      showToast(`⚠️ Probe degraded: ${durationMs} ms (exceeds ${threshold} ms threshold)`);
-    } else {
-      showToast(`❌ Probe failed: ${errorMessage || 'Service unreachable'}`);
-    }
-  }
-
-  // Generate 24 hours of simulated realistic checks for a monitor
-  async function seedSampleHistory(monitorId, btnElement = null) {
-    const m = state.monitors.find(mon => mon.id === monitorId);
-    if (!m) return;
-
-    const originalBtnText = btnElement ? btnElement.innerHTML : null;
-    if (btnElement) {
-      btnElement.disabled = true;
-      btnElement.innerHTML = '⏳ Generating…';
-    }
-
-    const now = Date.now();
-    const rows = [];
-    for (let i = 23; i >= 0; i--) {
-      const t = new Date(now - i * 3600000);
-      const baseLat = 150 + Math.floor(Math.sin(i / 3) * 35);
-      const jitter = Math.floor(Math.random() * 55);
-      const lat = Math.max(70, baseLat + jitter);
-
-      rows.push({
-        monitor_id: monitorId,
-        user_id: state.user?.id,
-        checked_at: t.toISOString(),
-        status: 'UP',
-        status_code: 200,
-        response_time_ms: lat,
-        error_message: null,
-        is_retry: false
-      });
-    }
-
-    state.checks = [...rows.slice().reverse(), ...state.checks.filter(c => c.monitor_id !== monitorId)];
-    m.current_status = 'UP';
-    m.last_checked_at = new Date().toISOString();
-
-    if (state.client && state.user) {
-      try {
-        const { error } = await state.client.from('checks').insert(rows);
-        if (error) console.warn('Supabase sample insert:', error.message);
-
-        await state.client.from('monitors').update({
-          current_status: 'UP',
-          last_checked_at: m.last_checked_at,
-          next_check_at: new Date(Date.now() + m.interval_minutes * 60000).toISOString()
-        }).eq('id', monitorId);
-      } catch (err) {
-        console.warn('Sample checks persistence note:', err);
-      }
-    }
-
-    renderOverview();
-    renderMonitors();
-    if (state.currentMonitorId === monitorId) {
-      renderMonitorDetail(monitorId);
-    }
-
-    if (btnElement) {
-      btnElement.disabled = false;
-      btnElement.innerHTML = originalBtnText;
-    }
-
-    showToast('24 hours of dynamic check history generated!');
-  }
-
-  // Wire Detail Action Buttons
-  const pingNowBtn = $('#btn-ping-now');
-  if (pingNowBtn) {
-    pingNowBtn.onclick = () => {
-      if (state.currentMonitorId) triggerManualPing(state.currentMonitorId, pingNowBtn);
-    };
-  }
-
-  const seedBtn = $('#btn-seed-sample');
-  if (seedBtn) {
-    seedBtn.onclick = () => {
-      if (state.currentMonitorId) seedSampleHistory(state.currentMonitorId, seedBtn);
-    };
-  }
-
   // Render Monitors Page
   function renderMonitors() {
     const tb = $('#mon-tb');
@@ -1156,15 +1165,15 @@
       if (search && !m.name.toLowerCase().includes(search) && !m.url.toLowerCase().includes(search)) {
         return false;
       }
-      const stKey = m.is_paused ? 'PAUSED' : (m.current_status || 'UNKNOWN');
+      const stKey = getEffectiveStatus(m);
       if (filter !== 'all' && stKey !== filter) return false;
       return true;
     });
 
     // Sorting
     list.sort((a, b) => {
-      const stA = a.is_paused ? 'PAUSED' : (a.current_status || 'UNKNOWN');
-      const stB = b.is_paused ? 'PAUSED' : (b.current_status || 'UNKNOWN');
+      const stA = getEffectiveStatus(a);
+      const stB = getEffectiveStatus(b);
       if (sort === 'down_first') {
         if (stA === 'DOWN' && stB !== 'DOWN') return -1;
         if (stB === 'DOWN' && stA !== 'DOWN') return 1;
@@ -1187,11 +1196,13 @@
     }
 
     tb.innerHTML = list.map(m => {
-      const stKey = m.is_paused ? 'PAUSED' : (m.current_status || 'UNKNOWN');
+      const stKey = getEffectiveStatus(m);
       const s = statusStyles[stKey] || statusStyles.UNKNOWN;
       const stats = calculateMonitorUptime(m.id, 86400000);
       const strip = generate24HourStrip(m.id);
       const host = formatHost(m.url);
+      const isStale = stKey === 'UNKNOWN' && m.last_checked_at;
+      const statusLabel = isStale ? 'Unknown (stale)' : s.text;
 
       return `
         <tr>
@@ -1209,7 +1220,6 @@
           </td>
           <td style="text-align:right">
             <div class="actions-menu">
-              <button class="btn sm p" data-ping="${m.id}" title="Send an immediate keep-alive probe">⚡ Ping</button>
               <button class="btn sm" data-pause="${m.id}">${m.is_paused ? 'Resume' : 'Pause'}</button>
               <button class="btn sm" data-edit="${m.id}">Edit</button>
               <button class="btn sm danger" data-delete="${m.id}">Delete</button>
@@ -1227,13 +1237,6 @@
 
   // Monitors Table Actions
   $('#mon-tb').onclick = async e => {
-    const pingBtn = e.target.closest('[data-ping]');
-    if (pingBtn) {
-      const id = pingBtn.dataset.ping;
-      await triggerManualPing(id, pingBtn);
-      return;
-    }
-
     const detailTd = e.target.closest('[data-open-detail]');
     if (detailTd) {
       location.hash = '#overview';
@@ -1607,8 +1610,8 @@
       showToast('Please enter a target URL');
       return;
     }
-    if (isNaN(interval) || interval < 1 || interval > 1440) {
-      showToast('Please enter an interval between 1 and 1440 minutes');
+    if (isNaN(interval) || interval < 5 || interval > 1440) {
+      showToast('Minimum check interval is 5 minutes (5 to 1440 minutes)');
       return;
     }
     if (!/^https?:\/\//i.test(url)) {
@@ -1620,7 +1623,7 @@
       name,
       url,
       interval_minutes: interval,
-      timeout_seconds: state.settings.default_timeout_seconds || 90,
+      timeout_seconds: state.settings.default_timeout_seconds || 15,
       degraded_threshold_ms: threshold,
       next_check_at: new Date().toISOString()
     });
@@ -1649,8 +1652,8 @@
       showToast('Please fill all required fields');
       return;
     }
-    if (isNaN(interval) || interval < 1 || interval > 1440) {
-      showToast('Please enter an interval between 1 and 1440 minutes');
+    if (isNaN(interval) || interval < 5 || interval > 1440) {
+      showToast('Minimum check interval is 5 minutes (5 to 1440 minutes)');
       return;
     }
     if (!/^https?:\/\//i.test(url)) {

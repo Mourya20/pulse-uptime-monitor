@@ -32,7 +32,7 @@ func NewEngine(cfg *config.Config, repo db.Repository, chk *checker.Checker) *En
 	}
 }
 
-// Run executes a single monitoring cycle across all due monitors.
+// Run executes a single monitoring cycle across due monitors within bounded limits.
 func (e *Engine) Run(ctx context.Context) error {
 	log.Println("[Pulse] Starting monitoring cycle...")
 
@@ -47,8 +47,21 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	defer unlock()
 
-	// 2. Claim due monitors atomically
-	monitors, err := e.repo.ClaimDueMonitors(ctx)
+	// 2. Mark any unpaused monitors that exceeded their grace period as UNKNOWN
+	staleCount, err := e.repo.MarkStaleMonitors(ctx)
+	if err != nil {
+		log.Printf("[Pulse] Warning: failed to evaluate stale monitors: %v\n", err)
+	} else if staleCount > 0 {
+		log.Printf("[Pulse] Marked %d stale monitor(s) as UNKNOWN (exceeded check interval grace period).\n", staleCount)
+	}
+
+	// 3. Claim due monitors in a bounded batch
+	batchSize := e.cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+
+	monitors, err := e.repo.ClaimDueMonitors(ctx, batchSize)
 	if err != nil {
 		return fmt.Errorf("failed to claim due monitors: %w", err)
 	}
@@ -58,9 +71,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("[Pulse] Claimed %d due monitor(s) for keep-alive and check execution.\n", len(monitors))
+	log.Printf("[Pulse] Claimed %d due monitor(s) (batch limit: %d) for keep-alive and check execution.\n", len(monitors), batchSize)
 
-	// 3. Process monitors concurrently with bounded worker pool
+	// 4. Process monitors concurrently with bounded worker pool
 	concurrency := e.cfg.Concurrency
 	if concurrency <= 0 {
 		concurrency = 10
@@ -83,18 +96,34 @@ func (e *Engine) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for m := range workChan {
-				if err := e.processMonitor(ctx, m); err != nil {
-					log.Printf("[Pulse] Error processing monitor %s (%s): %v\n", m.Name, m.URL, err)
-					errOnce.Do(func() {
-						firstErr = err
-					})
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case m, ok := <-workChan:
+					if !ok {
+						return
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					if err := e.processMonitor(ctx, m); err != nil {
+						log.Printf("[Pulse] Error processing monitor %s (%s): %v\n", m.Name, m.URL, err)
+						errOnce.Do(func() {
+							firstErr = err
+						})
+					}
 				}
 			}
 		}()
 	}
 
 	wg.Wait()
+
+	if ctx.Err() != nil {
+		log.Printf("[Pulse] Monitoring cycle interrupted by context cancellation/timeout: %v\n", ctx.Err())
+		return ctx.Err()
+	}
 
 	log.Println("[Pulse] Monitoring cycle finished successfully.")
 	return firstErr
@@ -133,7 +162,7 @@ func (e *Engine) processMonitor(ctx context.Context, m model.Monitor) error {
 		return fmt.Errorf("failed to record check: %w", err)
 	}
 
-	// Process incident detection / recovery and update monitor status
+	// Process incident detection / recovery, advance next_check_at, and update monitor status
 	if err := e.repo.ProcessIncidentAndStatus(ctx, &m, result, inMaintenance, now); err != nil {
 		return fmt.Errorf("failed to process incident and monitor status: %w", err)
 	}

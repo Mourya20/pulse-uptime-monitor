@@ -1,13 +1,20 @@
 -- =============================================================================
 -- Migration: 003_worker_role.sql
--- Description: Dedicated least-privilege PostgreSQL role for the Go monitoring worker
+-- Description: Dedicated least-privilege PostgreSQL role for the Go monitoring worker.
+--
+-- SECURITY NOTICE:
+-- Never hardcode or commit actual passwords in this file.
+-- The pulse_worker role is provisioned below without a committed password.
+-- To set or rotate the worker's password securely, execute in your database SQL console:
+--   ALTER ROLE pulse_worker WITH LOGIN PASSWORD '<your-generated-strong-password>';
+-- Store the resulting connection string ONLY in GitHub Secrets as DATABASE_URL.
 -- =============================================================================
 
 -- 1. Create the dedicated worker role with login if it does not already exist
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'pulse_worker') THEN
-        CREATE ROLE pulse_worker WITH LOGIN PASSWORD 'REPLACE_WITH_SECURE_PASSWORD' NOINHERIT;
+        CREATE ROLE pulse_worker WITH LOGIN NOINHERIT;
     END IF;
 END
 $$;
