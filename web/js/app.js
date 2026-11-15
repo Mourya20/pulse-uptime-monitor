@@ -1181,8 +1181,8 @@
       }
       if (sort === 'name_asc') return a.name.localeCompare(b.name);
       if (sort === 'uptime_desc' || sort === 'uptime_asc') {
-        const uA = calculateMonitorUptime(a.id, 86400000).uptimePct;
-        const uB = calculateMonitorUptime(b.id, 86400000).uptimePct;
+        const uA = calculateMonitorUptime(a.id, 86400000).uptimePct ?? -1;
+        const uB = calculateMonitorUptime(b.id, 86400000).uptimePct ?? -1;
         return sort === 'uptime_desc' ? uB - uA : uA - uB;
       }
       return 0;
@@ -1706,6 +1706,19 @@
     const timeout = parseInt($('#set-timeout').value, 10);
     const degraded = parseInt($('#set-degraded').value, 10);
     const tz = $('#set-tz').value;
+
+    if (isNaN(interval) || interval < 5 || interval > 1440) {
+      showToast('Default check interval must be between 5 and 1440 minutes');
+      return;
+    }
+    if (isNaN(timeout) || timeout < 5 || timeout > 120) {
+      showToast('Default timeout must be between 5 and 120 seconds');
+      return;
+    }
+    if (isNaN(degraded) || degraded < 100 || degraded > 10000) {
+      showToast('Degraded threshold must be between 100 and 10000 ms');
+      return;
+    }
 
     state.settings.default_interval_minutes = interval;
     state.settings.default_timeout_seconds = timeout;
