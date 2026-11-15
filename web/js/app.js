@@ -808,9 +808,10 @@
     // 1. If currently DOWN, count duration since current outage started
     if (st === 'DOWN') {
       const activeInc = state.incidents.find(inc => inc.monitor_id === monitor.id && !inc.resolved_at);
-      const startTime = activeInc ? new Date(activeInc.started_at).getTime() : new Date(monitor.last_checked_at || Date.now()).getTime();
+      const startStr = activeInc ? activeInc.started_at : monitor.last_checked_at;
+      const startTime = startStr ? new Date(startStr).getTime() : Date.now();
       const diffSec = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
-      return `DOWN for ${formatDuration(diffSec)}`;
+      return `Down for ${formatDuration(diffSec)}`;
     }
 
     // 2. Currently UP (or DEGRADED): calculate continuous uptime since last downtime
@@ -818,24 +819,37 @@
       .filter(inc => inc.monitor_id === monitor.id)
       .sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
 
-    let continuousUpStart;
+    let continuousUpStart = 0;
     if (monIncidents.length > 0 && monIncidents[0].resolved_at) {
-      // Continuous uptime started when the latest incident was resolved
       continuousUpStart = new Date(monIncidents[0].resolved_at).getTime();
-    } else {
-      // No incidents: continuous uptime since the earliest check or monitor creation
+    }
+
+    if (!continuousUpStart || isNaN(continuousUpStart)) {
+      // No prior incident: calculate from monitor creation or earliest check
       const monChecks = state.checks.filter(c => c.monitor_id === monitor.id);
-      if (monChecks.length > 0) {
-        const earliestCheckTime = Math.min(...monChecks.map(c => new Date(c.checked_at).getTime()));
-        const createdTime = monitor.created_at ? new Date(monitor.created_at).getTime() : earliestCheckTime;
-        continuousUpStart = Math.min(earliestCheckTime, createdTime);
+      const checkTimes = monChecks
+        .map(c => new Date(c.checked_at).getTime())
+        .filter(t => !isNaN(t) && t > 0);
+
+      const createdTime = monitor.created_at ? new Date(monitor.created_at).getTime() : 0;
+
+      if (createdTime > 0 && checkTimes.length > 0) {
+        continuousUpStart = Math.min(createdTime, Math.min(...checkTimes));
+      } else if (createdTime > 0) {
+        continuousUpStart = createdTime;
+      } else if (checkTimes.length > 0) {
+        continuousUpStart = Math.min(...checkTimes);
       } else {
-        continuousUpStart = monitor.created_at ? new Date(monitor.created_at).getTime() : Date.now();
+        continuousUpStart = monitor.last_checked_at ? new Date(monitor.last_checked_at).getTime() : Date.now();
       }
     }
 
+    if (isNaN(continuousUpStart) || continuousUpStart <= 0) {
+      continuousUpStart = Date.now();
+    }
+
     const diffSec = Math.max(0, Math.floor((Date.now() - continuousUpStart) / 1000));
-    return `UP for ${formatDuration(diffSec)}`;
+    return `Up for ${formatDuration(diffSec)}`;
   }
 
   // Draw SVG Latency Chart matching pulse-reference.html
