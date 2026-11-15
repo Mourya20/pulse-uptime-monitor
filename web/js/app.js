@@ -1275,7 +1275,7 @@
       $('#edit-id').value = m.id;
       $('#edit-name').value = m.name;
       $('#edit-url').value = m.url;
-      $('#edit-interval').value = String(m.interval_minutes);
+      updateIntervalSelector('#edit-interval-seg', '#edit-interval', m.interval_minutes || 5);
       $('#edit-threshold').value = String(m.degraded_threshold_ms);
       $('#edit-ov').classList.add('on');
       return;
@@ -1540,11 +1540,52 @@
     }
   };
 
+  // Minimalist Line Style & Custom Numeric Input Interval Selector
+  function setupIntervalSelector(segId, inputId) {
+    const seg = $(segId);
+    const input = $(inputId);
+    if (!seg || !input) return;
+
+    const syncButtons = val => {
+      const num = parseInt(val, 10);
+      $$('button', seg).forEach(b => {
+        b.classList.toggle('on', parseInt(b.dataset.val, 10) === num);
+      });
+    };
+
+    seg.onclick = e => {
+      const btn = e.target.closest('button[data-val]');
+      if (!btn) return;
+      const val = btn.dataset.val;
+      input.value = val;
+      syncButtons(val);
+    };
+
+    input.oninput = () => {
+      syncButtons(input.value);
+    };
+  }
+
+  function updateIntervalSelector(segId, inputId, val) {
+    const input = $(inputId);
+    const seg = $(segId);
+    const num = parseInt(val, 10) || 5;
+    if (input) input.value = String(num);
+    if (seg) {
+      $$('button', seg).forEach(b => {
+        b.classList.toggle('on', parseInt(b.dataset.val, 10) === num);
+      });
+    }
+  }
+
+  setupIntervalSelector('#m-interval-seg', '#m-interval');
+  setupIntervalSelector('#edit-interval-seg', '#edit-interval');
+
   // Create Monitor Modal Handlers
   $$('[data-open]').forEach(b => b.onclick = () => {
     $('#m-name').value = '';
     $('#m-url').value = '';
-    $('#m-interval').value = String(state.settings.default_interval_minutes || 15);
+    updateIntervalSelector('#m-interval-seg', '#m-interval', state.settings.default_interval_minutes || 5);
     $('#m-threshold').value = String(state.settings.degraded_threshold_ms || 1000);
     $('#ov').classList.add('on');
   });
@@ -1564,6 +1605,10 @@
     }
     if (!url) {
       showToast('Please enter a target URL');
+      return;
+    }
+    if (isNaN(interval) || interval < 1 || interval > 1440) {
+      showToast('Please enter an interval between 1 and 1440 minutes');
       return;
     }
     if (!/^https?:\/\//i.test(url)) {
@@ -1602,6 +1647,10 @@
 
     if (!name || !url) {
       showToast('Please fill all required fields');
+      return;
+    }
+    if (isNaN(interval) || interval < 1 || interval > 1440) {
+      showToast('Please enter an interval between 1 and 1440 minutes');
       return;
     }
     if (!/^https?:\/\//i.test(url)) {

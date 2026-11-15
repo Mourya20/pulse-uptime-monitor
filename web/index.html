@@ -339,11 +339,21 @@
       <label>URL</label>
       <input class="in mono" id="m-url" placeholder="https://api.example.com/health">
       <label>Check interval</label>
-      <select class="in" id="m-interval">
-        <option value="5">5 minutes</option>
-        <option value="15" selected>15 minutes</option>
-        <option value="30">30 minutes</option>
-      </select>
+      <div class="interval-ctrl">
+        <div class="interval-line" id="m-interval-seg">
+          <button type="button" data-val="1">1m</button>
+          <button type="button" data-val="3">3m</button>
+          <button type="button" data-val="5" class="on">5m</button>
+          <button type="button" data-val="10">10m</button>
+          <button type="button" data-val="15">15m</button>
+          <button type="button" data-val="30">30m</button>
+          <button type="button" data-val="60">1h</button>
+        </div>
+        <div class="interval-input-row">
+          <input class="in mono" id="m-interval" type="number" min="1" max="1440" value="5" placeholder="5">
+          <span class="sub">minutes</span>
+        </div>
+      </div>
       <label>Degraded latency threshold (ms)</label>
       <input class="in mono" id="m-threshold" type="number" value="1000">
       <div class="act">
@@ -363,11 +373,21 @@
       <label>URL</label>
       <input class="in mono" id="edit-url">
       <label>Check interval</label>
-      <select class="in" id="edit-interval">
-        <option value="5">5 minutes</option>
-        <option value="15">15 minutes</option>
-        <option value="30">30 minutes</option>
-      </select>
+      <div class="interval-ctrl">
+        <div class="interval-line" id="edit-interval-seg">
+          <button type="button" data-val="1">1m</button>
+          <button type="button" data-val="3">3m</button>
+          <button type="button" data-val="5">5m</button>
+          <button type="button" data-val="10">10m</button>
+          <button type="button" data-val="15">15m</button>
+          <button type="button" data-val="30">30m</button>
+          <button type="button" data-val="60">1h</button>
+        </div>
+        <div class="interval-input-row">
+          <input class="in mono" id="edit-interval" type="number" min="1" max="1440" value="5" placeholder="5">
+          <span class="sub">minutes</span>
+        </div>
+      </div>
       <label>Degraded latency threshold (ms)</label>
       <input class="in mono" id="edit-threshold" type="number">
       <div class="act">

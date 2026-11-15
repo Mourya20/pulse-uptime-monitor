@@ -361,6 +361,62 @@ h1 {
   color: #fff;
 }
 
+.interval-ctrl {
+  margin-top: 4px;
+  margin-bottom: 14px;
+}
+
+.interval-line {
+  display: flex;
+  width: 100%;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.interval-line button {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--bd);
+  padding: 6px 0;
+  color: var(--t2);
+  cursor: pointer;
+  font: 12px "Geist Mono", monospace;
+  text-align: center;
+  transition: background .13s, color .13s;
+}
+
+.interval-line button:last-child {
+  border-right: 0;
+}
+
+.interval-line button:hover {
+  background: var(--hv);
+  color: #fff;
+}
+
+.interval-line button.on {
+  background: #ffffff;
+  color: #000000;
+  font-weight: 600;
+}
+
+.interval-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.interval-input-row input {
+  width: 80px;
+  text-align: center;
+  height: 30px;
+  font-size: 13px;
+}
+
 .stats {
   display: flex;
   gap: 40px;
