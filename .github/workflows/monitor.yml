@@ -1,0 +1,40 @@
+name: Pulse Keep-Alive & Monitoring Runner
+
+on:
+  schedule:
+    # Trigger every 5 minutes with a 2-minute offset (e.g. :02, :07, :12, :17...)
+    - cron: '2/5 * * * *'
+  workflow_dispatch:
+
+# Prevent concurrent overlapping workflow executions
+concurrency:
+  group: pulse-monitoring-engine
+  cancel-in-progress: false
+
+# Restrict default repository permissions to minimum read-only
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    name: Probe Due Monitors
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build monitoring executable
+        run: go build -v -o bin/pulse ./cmd/pulse
+
+      - name: Execute keep-alive probes
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: ./bin/pulse

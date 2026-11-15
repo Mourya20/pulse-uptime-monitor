@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pulse – Uptime Monitor</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <aside>
+    <div class="logo"><i></i><b>Pulse</b></div>
+    <nav>
+      <a href="#overview" data-p="overview"><svg viewBox="0 0 16 16"><path d="M2 8h3l2-5 2 10 2-5h3"/></svg><span>Overview</span></a>
+      <a href="#monitors" data-p="monitors"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="8" rx="1"/><path d="M6 14h4"/></svg><span>Monitors</span></a>
+      <a href="#incidents" data-p="incidents"><svg viewBox="0 0 16 16"><path d="M8 2l6 11H2z"/><path d="M8 7v3"/></svg><span>Incidents</span></a>
+      <a href="#maintenance" data-p="maintenance"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1"/></svg><span>Maintenance</span></a>
+      <div class="lbl">Account</div>
+      <a href="#settings" data-p="settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2"/></svg><span>Settings</span></a>
+    </nav>
+    <div class="side-foot" id="fleet-status">
+      <span class="dot bgg" id="fleet-dot"></span><span id="fleet-status-text">All systems operational</span>
+    </div>
+  </aside>
+
+  <main>
+    <div class="top">
+      <div class="crumb">Pulse / <b id="crumb">Overview</b></div>
+      <div class="search" id="quick-search">Search…<kbd>⌘K</kbd></div>
+    </div>
+
+    <!-- OVERVIEW PAGE -->
+    <section class="page" id="overview">
+      <div class="head fl">
+        <h1>Overview</h1>
+        <button class="btn p" data-open>New monitor</button>
+      </div>
+
+      <div class="box met fl" id="fsum" style="margin-top:0">
+        <div><div class="k">Monitors</div><div class="v mono" id="sm-total">0</div></div>
+        <div><div class="k">Up</div><div class="v mono g" id="sm-up">0</div></div>
+        <div><div class="k">Down</div><div class="v mono r" id="sm-down">0</div></div>
+        <div><div class="k">Degraded</div><div class="v mono y" id="sm-degraded">0</div></div>
+        <div><div class="k">Avg uptime (24h)</div><div class="v mono" id="sm-uptime">100%</div></div>
+      </div>
+
+      <div class="head fl" style="margin:24px 0 12px">
+        <div style="font-weight:500">Monitors</div>
+        <div class="sub">Select a monitor for details</div>
+      </div>
+      <div class="box tw fl">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>24h uptime</th>
+              <th>Last 24h</th>
+              <th>Avg response</th>
+              <th>Last check</th>
+            </tr>
+          </thead>
+          <tbody id="ftb">
+            <tr><td colspan="6" class="sub" style="text-align:center;padding:32px">Loading fleet monitors...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="head fl" style="margin:24px 0 12px">
+        <div style="font-weight:500">Recent activity</div>
+      </div>
+      <div class="box tl fl" id="fact">
+        <div class="sub" style="padding:16px;text-align:center">No recent incident activity</div>
+      </div>
+
+      <!-- MONITOR DETAIL SUBVIEW -->
+      <div class="head dt">
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="btn" id="back">← All monitors</button>
+          <h1 id="dname">Monitor</h1>
+        </div>
+        <div class="seg" id="rng">
+          <button class="on" data-range="24h">24h</button>
+          <button data-range="7d">7d</button>
+          <button data-range="30d">30d</button>
+        </div>
+      </div>
+
+      <div class="box row3 dt">
+        <div>
+          <div class="k">Current status</div>
+          <div class="v" id="d-status"><span class="dot bgg"></span>Up</div>
+          <div class="sub mono" id="d-since">Up for 0h 0m</div>
+        </div>
+        <div>
+          <div class="k">Last check</div>
+          <div class="v" id="d-lastcheck">Just now</div>
+          <div class="sub" id="d-interval">Every 5m</div>
+        </div>
+        <div>
+          <div class="k" id="d-rangetitle">Last 24 hours</div>
+          <div class="v mono" id="d-rangeuptime">100%</div>
+          <div class="strip" id="strip"></div>
+          <div class="sub mono" id="d-incdowntime">0 incidents · 0m down</div>
+        </div>
+      </div>
+
+      <div class="box met dt">
+        <div>
+          <div class="k">Last 7 days</div>
+          <div class="v mono g" id="d-7d">100%</div>
+          <div class="sub mono" id="d-7d-inc">0 incidents</div>
+        </div>
+        <div>
+          <div class="k">Last 30 days</div>
+          <div class="v mono g" id="d-30d">100%</div>
+          <div class="sub mono" id="d-30d-down">0m down</div>
+        </div>
+        <div>
+          <div class="k">Last 365 days</div>
+          <div class="v mono" id="d-365d" style="color:var(--tx)">100%</div>
+          <div class="sub">Historical uptime</div>
+        </div>
+        <div>
+          <div class="k" id="d-dtlabel">Downtime (7d)</div>
+          <div class="v mono" id="d-dtval">0m</div>
+          <div class="sub mono">Observed outages</div>
+        </div>
+        <div>
+          <div class="k" id="d-mtbflabel">MTBF (7d)</div>
+          <div class="v mono g" id="d-mtbf">0.0h</div>
+          <div class="sub">Mean time between failures</div>
+        </div>
+      </div>
+
+      <div class="box chart dt" style="position:relative">
+        <div class="head" style="margin-bottom:8px">
+          <div>
+            <div style="font-weight:500">Response time</div>
+            <div class="sub" id="d-chartsub">All probes · Target URL</div>
+          </div>
+        </div>
+        <svg class="ch" id="chart" viewBox="0 0 800 220" preserveAspectRatio="none"></svg>
+        <div class="tip mono" id="tip"></div>
+        <div class="stats">
+          <div><div class="k">Average</div><div class="v mono" id="ch-avg">0 ms</div></div>
+          <div><div class="k">Minimum</div><div class="v mono g" id="ch-min">0 ms</div></div>
+          <div><div class="k">Maximum</div><div class="v mono r" id="ch-max">0 ms</div></div>
+        </div>
+      </div>
+
+      <div class="head dt" style="margin:24px 0 12px">
+        <div style="font-weight:500">Monitor incidents</div>
+      </div>
+      <div class="box tw dt">
+        <table>
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Root cause</th>
+              <th>Started</th>
+              <th>Resolved</th>
+              <th>Duration</th>
+            </tr>
+          </thead>
+          <tbody id="d-inc-tb">
+            <tr><td colspan="5" class="sub" style="text-align:center;padding:24px">No incidents recorded for this monitor.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- MONITORS PAGE -->
+    <section class="page" id="monitors">
+      <div class="head">
+        <h1>Monitors</h1>
+        <button class="btn p" data-open>New monitor</button>
+      </div>
+      <div class="tool">
+        <input class="in" id="mon-search" placeholder="Search by name or URL" style="flex:1;max-width:320px">
+        <select class="in" id="mon-filter">
+          <option value="all">All statuses</option>
+          <option value="UP">Up</option>
+          <option value="DOWN">Down</option>
+          <option value="DEGRADED">Degraded</option>
+          <option value="PAUSED">Paused</option>
+        </select>
+        <select class="in" id="mon-sort">
+          <option value="down_first">Down first ▾</option>
+          <option value="name_asc">Name A-Z</option>
+          <option value="uptime_desc">Highest uptime</option>
+          <option value="uptime_asc">Lowest uptime</option>
+        </select>
+      </div>
+      <div class="box tw">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Interval</th>
+              <th>24h Uptime</th>
+              <th style="text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="mon-tb">
+            <tr><td colspan="5" class="sub" style="text-align:center;padding:32px">Loading monitors...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="sub" id="mon-count" style="margin-top:10px">Using 0 monitors</div>
+    </section>
+
+    <!-- INCIDENTS PAGE -->
+    <section class="page" id="incidents">
+      <div class="head">
+        <h1>Incidents</h1>
+        <div style="display:flex;gap:8px">
+          <div class="seg" id="vw">
+            <button class="on">Table</button>
+            <button>Timeline</button>
+          </div>
+          <button class="btn" id="exp">Export logs</button>
+        </div>
+      </div>
+      <div class="tool">
+        <input class="in" id="inc-search" placeholder="Search by name or URL" style="flex:1;max-width:320px">
+        <select class="in" id="inc-filter">
+          <option value="all">All incidents</option>
+          <option value="active">Active outages</option>
+          <option value="resolved">Resolved</option>
+        </select>
+        <select class="in" id="inc-sort">
+          <option value="newest">Newest ▾</option>
+          <option value="oldest">Oldest ▾</option>
+        </select>
+      </div>
+      <div class="box tw" id="tbl">
+        <table>
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Monitor</th>
+              <th>Root cause</th>
+              <th>Started</th>
+              <th>Resolved</th>
+              <th>Duration</th>
+            </tr>
+          </thead>
+          <tbody id="inc">
+            <tr><td colspan="6" class="sub" style="text-align:center;padding:32px">Loading incidents...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="box tl" id="tln" style="display:none"></div>
+    </section>
+
+    <!-- MAINTENANCE PAGE -->
+    <section class="page" id="maintenance">
+      <div class="head">
+        <h1>Maintenance windows</h1>
+        <button class="btn p" id="open-maint">Create maintenance</button>
+      </div>
+      <div class="box empty" id="maint-empty">
+        <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 1"/></svg>
+        <div style="font-weight:500">No maintenance scheduled</div>
+        <p>Schedule planned downtime so no alerts fire and your uptime stays untouched.</p>
+        <button class="btn" id="open-maint-2">Create maintenance</button>
+      </div>
+      <div class="box tw" id="maint-table-box" style="display:none">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Applies to</th>
+              <th>Start time</th>
+              <th>End time</th>
+              <th>Status</th>
+              <th style="text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="maint-tb"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- SETTINGS PAGE -->
+    <section class="page" id="settings">
+      <div class="head"><h1>Settings</h1></div>
+      <div class="box" style="padding:20px;max-width:520px">
+        <div class="k">Signed in as</div>
+        <div class="sub mono" id="settings-user" style="font-size:14px;color:var(--tx);margin-bottom:16px">owner@example.com</div>
+
+        <div class="k">Default check interval</div>
+        <select class="in" id="set-interval" style="width:100%">
+          <option value="5">5 minutes</option>
+          <option value="15" selected>15 minutes</option>
+          <option value="30">30 minutes</option>
+        </select>
+
+        <div class="k" style="margin-top:16px">Default request timeout</div>
+        <input class="in" id="set-timeout" type="number" min="5" max="120" value="90" style="width:100%">
+        <div class="sub">Timeout in seconds (5–120s)</div>
+
+        <div class="k" style="margin-top:16px">Latency warning threshold</div>
+        <input class="in" id="set-degraded" type="number" min="100" max="10000" value="1000" style="width:100%">
+        <div class="sub">Responses slower than this (in ms) trigger DEGRADED status</div>
+
+        <div class="k" style="margin-top:16px">Dashboard timezone</div>
+        <select class="in" id="set-tz" style="width:100%">
+          <option value="UTC" selected>UTC</option>
+          <option value="LOCAL">Browser Local Time</option>
+        </select>
+
+        <div class="act" style="margin-top:24px;justify-content:space-between">
+          <button class="btn danger" id="btn-signout">Sign out</button>
+          <button class="btn p" id="save">Save changes</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- MODALS -->
+
+  <!-- Create Monitor Modal -->
+  <div class="ov" id="ov">
+    <div class="modal">
+      <h2>New monitor</h2>
+      <label>Name</label>
+      <input class="in" id="m-name" placeholder="Production API">
+      <label>URL</label>
+      <input class="in mono" id="m-url" placeholder="https://api.example.com/health">
+      <label>Check interval</label>
+      <select class="in" id="m-interval">
+        <option value="5">5 minutes</option>
+        <option value="15" selected>15 minutes</option>
+        <option value="30">30 minutes</option>
+      </select>
+      <label>Degraded latency threshold (ms)</label>
+      <input class="in mono" id="m-threshold" type="number" value="1000">
+      <div class="act">
+        <button class="btn" id="cx">Cancel</button>
+        <button class="btn p" id="cr">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Monitor Modal -->
+  <div class="ov" id="edit-ov">
+    <div class="modal">
+      <h2>Edit monitor</h2>
+      <input type="hidden" id="edit-id">
+      <label>Name</label>
+      <input class="in" id="edit-name">
+      <label>URL</label>
+      <input class="in mono" id="edit-url">
+      <label>Check interval</label>
+      <select class="in" id="edit-interval">
+        <option value="5">5 minutes</option>
+        <option value="15">15 minutes</option>
+        <option value="30">30 minutes</option>
+      </select>
+      <label>Degraded latency threshold (ms)</label>
+      <input class="in mono" id="edit-threshold" type="number">
+      <div class="act">
+        <button class="btn" id="edit-cx">Cancel</button>
+        <button class="btn p" id="edit-save">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Confirm Modal -->
+  <div class="ov" id="del-ov">
+    <div class="modal">
+      <h2>Delete monitor</h2>
+      <p class="sub" style="margin-bottom:16px">Are you sure you want to permanently delete <b id="del-mon-name" style="color:var(--tx)"></b>? All historical checks and incident records will be removed.</p>
+      <div class="act">
+        <button class="btn" id="del-cx">Cancel</button>
+        <button class="btn danger" id="del-confirm">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Maintenance Modal -->
+  <div class="ov" id="maint-ov">
+    <div class="modal">
+      <h2>Create maintenance window</h2>
+      <label>Name</label>
+      <input class="in" id="mw-name" placeholder="Database Migration">
+      <label>Description (optional)</label>
+      <input class="in" id="mw-desc" placeholder="Scheduled maintenance window">
+      <label>Target monitor</label>
+      <select class="in" id="mw-mon">
+        <option value="">All monitors (Fleet-wide)</option>
+      </select>
+      <label>Start time (UTC)</label>
+      <input class="in mono" id="mw-start" type="datetime-local">
+      <label>End time (UTC)</label>
+      <input class="in mono" id="mw-end" type="datetime-local">
+      <div class="act">
+        <button class="btn" id="maint-cx">Cancel</button>
+        <button class="btn p" id="maint-save">Schedule</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Supabase Login / Setup Modal -->
+  <div class="ov" id="auth-ov">
+    <div class="modal" style="width:380px">
+      <h2>Sign in to Pulse</h2>
+      <div class="error-banner" id="auth-err"></div>
+      
+      <div id="auth-config-fields" style="display:none">
+        <label>Supabase Project URL</label>
+        <input class="in mono" id="auth-supa-url" placeholder="https://xyz.supabase.co">
+        <label>Supabase Anon Key</label>
+        <input class="in mono" id="auth-supa-key" placeholder="eyJhbGciOiJIUzI1NiIsIn...">
+        <div style="border-top:1px solid var(--bd);margin:16px 0"></div>
+      </div>
+
+      <label>Owner Email</label>
+      <input class="in mono" id="auth-email" placeholder="owner@example.com" type="email">
+      <label>Password</label>
+      <input class="in mono" id="auth-pwd" type="password">
+      <div class="act">
+        <button class="btn" id="auth-setup-toggle" style="margin-right:auto">Config</button>
+        <button class="btn p" id="auth-login">Sign in</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

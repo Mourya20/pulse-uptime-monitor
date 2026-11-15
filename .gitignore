@@ -1,11 +1,27 @@
-@'
+# Binaries and build artifacts
+/pulse
+/pulse.exe
+dist/
+bin/
+
+# Environment files
 .env
 .env.*
 !.env.example
+
+# Logs and databases
 *.log
 *.db
+*.sqlite
+
+# Testing and coverage
 coverage.out
-dist/
+coverage.html
+
+# Dependencies
+vendor/
 node_modules/
+
+# OS files
 .DS_Store
-'@ | Set-Content -Encoding utf8 .gitignore
+Thumbs.db
