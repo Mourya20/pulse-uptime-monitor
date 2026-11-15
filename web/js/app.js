@@ -948,6 +948,59 @@
         badge.style.borderColor = isUp ? 'rgba(0, 200, 83, 0.4)' : 'rgba(255, 68, 68, 0.4)';
         badge.textContent = `${statusText} (${data.latencyMs}ms)`;
       }
+
+      // Synchronize verified probe result with Supabase database
+      if (state.client && state.user) {
+        try {
+          const checkedAt = new Date().toISOString();
+          const threshold = m.degraded_threshold_ms || 1000;
+          const finalStatus = isUp
+            ? (threshold > 0 && data.latencyMs > threshold ? 'DEGRADED' : 'UP')
+            : 'DOWN';
+
+          // 1. Insert verified check record
+          await state.client.from('checks').insert({
+            monitor_id: m.id,
+            user_id: state.user.id,
+            checked_at: checkedAt,
+            status: finalStatus,
+            status_code: data.statusCode || 0,
+            response_time_ms: data.latencyMs || 0,
+            error_message: isUp ? null : data.statusText,
+            is_retry: false
+          });
+
+          // 2. If recovered to UP/DEGRADED, resolve any active incident
+          if (isUp) {
+            const activeInc = state.incidents.find(inc => inc.monitor_id === m.id && !inc.resolved_at);
+            if (activeInc) {
+              const startMs = new Date(activeInc.started_at).getTime();
+              const durSec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+              await state.client.from('incidents').update({
+                resolved_at: checkedAt,
+                duration_seconds: durSec
+              }).eq('id', activeInc.id);
+            }
+          }
+
+          // 3. Update monitor status and next check schedule
+          const nextCheck = new Date(Date.now() + (m.interval_minutes || 5) * 60000).toISOString();
+          await state.client.from('monitors').update({
+            current_status: finalStatus,
+            last_checked_at: checkedAt,
+            next_check_at: nextCheck,
+            updated_at: checkedAt
+          }).eq('id', m.id);
+
+          // 4. Refresh live state and views
+          await loadAllData(true);
+          if (state.currentMonitorId === monitorId) {
+            renderMonitorDetail(monitorId);
+          }
+        } catch (dbErr) {
+          console.warn('Probe database sync note:', dbErr);
+        }
+      }
     } catch (err) {
       console.warn('Probe request note:', err);
       showToast('⚡ Live probe is available when hosted on Cloudflare. Scheduled checks run via GitHub Actions Go worker.', 5000);
