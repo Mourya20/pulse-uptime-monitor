@@ -431,8 +431,33 @@
 
   // Supabase Auth and Client Initialization
   async function initAuth() {
-    let supabaseUrl = window.PULSE_CONFIG?.supabaseUrl || localStorage.getItem('PULSE_SUPABASE_URL') || '';
-    let supabaseKey = window.PULSE_CONFIG?.supabaseAnonKey || localStorage.getItem('PULSE_SUPABASE_ANON_KEY') || '';
+    let supabaseUrl = (window.PULSE_CONFIG?.supabaseUrl || '').trim();
+    let supabaseKey = (window.PULSE_CONFIG?.supabaseAnonKey || '').trim();
+
+    // 1. If not in config.js, check localStorage
+    if (!supabaseUrl || !supabaseKey) {
+      supabaseUrl = (localStorage.getItem('PULSE_SUPABASE_URL') || '').trim();
+      supabaseKey = (localStorage.getItem('PULSE_SUPABASE_ANON_KEY') || '').trim();
+    }
+
+    // 2. If still not configured, check Cloudflare Pages environment variables via /api/config
+    if (!supabaseUrl || !supabaseKey) {
+      try {
+        const cfgRes = await fetch('/api/config');
+        if (cfgRes.ok) {
+          const cfg = await cfgRes.json();
+          if (cfg.configured && cfg.supabaseUrl && cfg.supabaseAnonKey) {
+            supabaseUrl = cfg.supabaseUrl.trim();
+            supabaseKey = cfg.supabaseAnonKey.trim();
+            window.PULSE_CONFIG = window.PULSE_CONFIG || {};
+            window.PULSE_CONFIG.supabaseUrl = supabaseUrl;
+            window.PULSE_CONFIG.supabaseAnonKey = supabaseKey;
+          }
+        }
+      } catch (e) {
+        // Fallback silently if /api/config is unreachable (e.g. offline or local preview)
+      }
+    }
 
     // Pre-populate input fields
     const urlInput = $('#auth-supa-url');
@@ -445,6 +470,9 @@
       $('#auth-ov').classList.add('on');
       return;
     }
+
+    // Config is present: keep technical fields collapsed so any device directly gets the clean Email/Password modal
+    $('#auth-config-fields').style.display = 'none';
 
     supabaseUrl = sanitizeSupabaseUrl(supabaseUrl);
 
@@ -475,10 +503,22 @@
     }
   }
 
+  // Brute-force protection tracking
+  let loginFailures = 0;
+  let loginLockoutUntil = 0;
+
   // Handle Login submission
   $('#auth-login').onclick = async () => {
     const errBanner = $('#auth-err');
     errBanner.classList.remove('on');
+
+    const now = Date.now();
+    if (now < loginLockoutUntil) {
+      const remainingSec = Math.ceil((loginLockoutUntil - now) / 1000);
+      errBanner.textContent = `Too many failed login attempts. Please wait ${remainingSec}s before retrying.`;
+      errBanner.classList.add('on');
+      return;
+    }
 
     const configFields = $('#auth-config-fields');
     let url = ($('#auth-supa-url').value || '').trim();
@@ -495,6 +535,7 @@
       $('#auth-supa-url').value = url;
       localStorage.setItem('PULSE_SUPABASE_URL', url);
       localStorage.setItem('PULSE_SUPABASE_ANON_KEY', key);
+      window.PULSE_CONFIG = window.PULSE_CONFIG || {};
       window.PULSE_CONFIG.supabaseUrl = url;
       window.PULSE_CONFIG.supabaseAnonKey = key;
       state.client = window.supabase.createClient(url, key);
@@ -514,9 +555,16 @@
       return;
     }
 
+    const loginBtn = $('#auth-login');
+    const originalBtnText = loginBtn.innerHTML;
+    loginBtn.disabled = true;
+    loginBtn.innerHTML = 'Signing in...';
+
     try {
       const { data, error } = await state.client.auth.signInWithPassword({ email, password });
       if (error) throw error;
+      loginFailures = 0;
+      loginLockoutUntil = 0;
       state.user = data.user;
       $('#auth-ov').classList.remove('on');
       $('#settings-user').textContent = state.user.email || 'Owner';
@@ -524,13 +572,24 @@
       await loadAllData();
       startPolling();
     } catch (err) {
+      loginFailures++;
+      if (loginFailures >= 5) {
+        loginLockoutUntil = Date.now() + 60000; // 60s cooldown
+      }
+
       let msg = err.message || 'Invalid credentials.';
       if (msg.includes('Failed to fetch') || msg.includes('fetch')) {
-        msg = 'Failed to fetch: Unable to reach Supabase. Check: 1) URL must be https://<id>.supabase.co (NOT the postgresql:// database string), 2) Check if project is paused in Supabase Dashboard, 3) Disable any ad-blockers.';
+        msg = 'Failed to fetch: Unable to reach Supabase. Check: 1) URL must be https://<id>.supabase.co (NOT postgresql://), 2) Check if project is paused in Supabase Dashboard, 3) Disable any ad-blockers.';
         $('#auth-config-fields').style.display = 'block';
+      } else if (loginFailures >= 5) {
+        msg += ' (Account locked for 60 seconds due to repeated failed attempts)';
       }
       errBanner.textContent = msg;
       errBanner.classList.add('on');
+      $('#auth-pwd').value = '';
+    } finally {
+      loginBtn.disabled = false;
+      loginBtn.innerHTML = originalBtnText;
     }
   };
 
