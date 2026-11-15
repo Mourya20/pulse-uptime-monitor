@@ -148,7 +148,7 @@ func (d *PgxDB) MarkStaleMonitors(ctx context.Context) (int64, error) {
 		WHERE is_paused = false
 		  AND current_status != 'UNKNOWN'
 		  AND last_checked_at IS NOT NULL
-		  AND last_checked_at < NOW() - ((interval_minutes * 2 + 10) || ' minutes')::INTERVAL;
+		  AND last_checked_at < NOW() - (interval '1 minute' * (interval_minutes * 2 + 10));
 	`
 	tag, err := d.pool.Exec(ctx, query)
 	if err != nil {
@@ -276,7 +276,7 @@ func (d *PgxDB) ProcessIncidentAndStatus(ctx context.Context, m *model.Monitor, 
 		UPDATE public.monitors
 		SET current_status = $1,
 		    last_checked_at = $2,
-		    next_check_at = $2 + (interval_minutes || ' minutes')::INTERVAL,
+		    next_check_at = $2 + (interval '1 minute' * interval_minutes),
 		    updated_at = $2
 		WHERE id = $3;
 	`
