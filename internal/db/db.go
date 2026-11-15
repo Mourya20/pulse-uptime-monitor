@@ -259,8 +259,8 @@ func (d *PgxDB) ProcessIncidentAndStatus(ctx context.Context, m *model.Monitor, 
 			// Found active incident: resolve it
 			updateIncident := `
 				UPDATE public.incidents
-				SET resolved_at = $1,
-				    duration_seconds = GREATEST(0, EXTRACT(EPOCH FROM ($1 - started_at))::INT)
+				SET resolved_at = $1::timestamptz,
+				    duration_seconds = GREATEST(0, EXTRACT(EPOCH FROM ($1::timestamptz - started_at))::INT)
 				WHERE id = $2;
 			`
 			if _, err := tx.Exec(ctx, updateIncident, checkedAt, incidentID); err != nil {
@@ -275,9 +275,9 @@ func (d *PgxDB) ProcessIncidentAndStatus(ctx context.Context, m *model.Monitor, 
 	updateMonitor := `
 		UPDATE public.monitors
 		SET current_status = $1,
-		    last_checked_at = $2,
-		    next_check_at = $2 + (interval '1 minute' * interval_minutes),
-		    updated_at = $2
+		    last_checked_at = $2::timestamptz,
+		    next_check_at = $2::timestamptz + (interval '1 minute' * interval_minutes),
+		    updated_at = $2::timestamptz
 		WHERE id = $3;
 	`
 	if _, err := tx.Exec(ctx, updateMonitor, finalStatus, checkedAt, m.ID); err != nil {
