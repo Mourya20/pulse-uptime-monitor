@@ -6,25 +6,24 @@ A lightweight, serverless HTTP keep-alive and uptime monitoring system. It pings
 
 ---
 
-## Recent Updates
+## Key Features
 
-- **Continuous Uptime Tracking**: Uptime timer runs continuously without resetting to 0s across successful checks.
-- **Real-Time Live Telemetry**: 1-second live ticker for elapsed timestamps, countdowns to next probes, and auto keep-alive in active tabs.
-- **Manual Instant Probing**: Interactive `⚡ Ping now` button to trigger immediate checks and measure latency on demand.
-- **24h Data Simulation**: `Generate 24h data` button to populate hourly availability bars, response-time curves, and MTBF metrics.
-- **Wrangler & Pages Deployment**: Zero-config deployment on Cloudflare Pages and Workers.
+- **Single Source of Truth**: Keep-alive probes and check metrics are executed exclusively by the compiled Go worker running in GitHub Actions. The web frontend is purely read-only for monitoring telemetry.
+- **Duration-Weighted Uptime**: Accurate availability calculations that properly account for maintenance windows (no double counting), outage incidents, and unobserved/unknown periods.
+- **Stale Detection**: Monitors that have not received a check within their grace period (`interval * 2 + 10 minutes`) are automatically classified and rendered as `UNKNOWN`.
+- **Bounded Claiming & Execution**: Monitors are processed in bounded batches without premature schedule advancement, ensuring unprocessed monitors remain due if runners time out.
+- **SSRF Protection**: Custom Go HTTP client with anti-SSRF address resolution and DNS rebinding protections.
+- **Zero Server Costs**: Deployed statically on Cloudflare Pages with Supabase PostgreSQL and GitHub Actions scheduled execution.
 
 ---
 
 ## How to Use the App
 
-1. **Open the Dashboard**: Visit [https://pulse-uptime-monitor.pages.dev/](https://pulse-uptime-monitor.pages.dev/).
-2. **Sign In**: Enter your owner email and password (credentials are authenticated via Supabase).
-3. **Add a Monitor**: Click **New monitor**, enter your app name and URL (e.g. `https://vaultora-banking.onrender.com`), and select a check interval (e.g. 5m).
-4. **Trigger Probes**:
-   - Let GitHub Actions automatically probe your endpoint every 5 minutes 24/7.
-   - Or click **⚡ Ping now** in the dashboard to execute an immediate keep-alive probe.
-5. **Inspect Performance**: Click any monitor row to view live status, continuous uptime duration, 24-hour availability bars, and the interactive SVG response-time chart.
+1. **Open the Dashboard**: Visit [https://pulse-uptime-monitor.pages.dev/](https://pulse-uptime-monitor.pages.dev/) (or your self-hosted deployment).
+2. **Sign In**: Enter your owner email and password (authenticated via Supabase).
+3. **Add a Monitor**: Click **New monitor**, enter your app name and URL (e.g. `https://vaultora-banking.onrender.com`), and select a check interval (minimum 5m).
+4. **Probing**: GitHub Actions probes your endpoints on a 5-minute schedule. Probes and latency metrics stream to the dashboard automatically.
+5. **Inspect Performance**: Click any monitor row to view live status, duration-weighted uptime, 24-hour strip, and the interactive SVG response-time chart.
 6. **Schedule Maintenance**: Use the **Maintenance** tab to suppress downtime alerts during planned deployments.
 
 ---
@@ -35,7 +34,7 @@ A lightweight, serverless HTTP keep-alive and uptime monitoring system. It pings
 GitHub Actions (Cron) ➔ Go Worker ➔ Probes Targets ➔ Supabase DB ➔ Cloudflare Pages
 ```
 
-GitHub Actions triggers the compiled Go worker every 5 minutes. The worker acquires PostgreSQL advisory locks, claims due monitors, and probes target URLs to keep free-tier services awake. Results and latency metrics are saved to Supabase PostgreSQL, and rendered in real time on the Cloudflare Pages static dashboard with zero idle server costs.
+GitHub Actions triggers the compiled Go worker every 5 minutes. The worker acquires PostgreSQL advisory locks, marks stale targets as `UNKNOWN`, claims due monitors in bounded batches, and probes target URLs to keep free-tier services awake. Results and latency metrics are saved to Supabase PostgreSQL, and rendered in real time on the Cloudflare Pages static dashboard.
 
 ---
 
@@ -43,7 +42,7 @@ GitHub Actions triggers the compiled Go worker every 5 minutes. The worker acqui
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| **Monitoring Engine** | Go (`cmd/pulse`) | Fast CLI with anti-SSRF SafeDialer and PostgreSQL advisory locks |
+| **Monitoring Engine** | Go 1.23+ (`cmd/pulse`) | Fast CLI with anti-SSRF SafeDialer and PostgreSQL advisory locks |
 | **Scheduler** | GitHub Actions | Serverless cron running every 5 minutes (`.github/workflows/monitor.yml`) |
 | **Database** | Supabase PostgreSQL | Stores monitors, checks, and incidents with Row Level Security |
 | **Frontend** | Vanilla JS / HTML / CSS | Monochromatic dark dashboard deployed on Cloudflare Pages (`web/`) |
@@ -54,23 +53,39 @@ GitHub Actions triggers the compiled Go worker every 5 minutes. The worker acqui
 
 ### 1. Database (Supabase)
 Run the SQL migration scripts in order via the Supabase SQL Editor:
-- `migrations/001_init_schema.sql` (schema & constraints)
+- `migrations/001_init_schema.sql` (Core schema, default 5m intervals, and constraints)
 - `migrations/002_rls_policies.sql` (Row Level Security policies)
+- `migrations/003_worker_role.sql` (Dedicated least-privilege `pulse_worker` role)
+- `migrations/005_enforce_min_interval.sql` (Aligns intervals to 5m minimum)
+
+To assign a secure password to the dedicated worker role without committing credentials:
+```sql
+ALTER ROLE pulse_worker WITH LOGIN PASSWORD '<your-generated-strong-password>';
+```
 
 ### 2. GitHub Actions Secrets
 In your repository under **Settings > Secrets and variables > Actions**, add:
 - **`DATABASE_URL`**:
   ```
-  postgresql://postgres.<project_ref>:<password>@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require
+  postgresql://pulse_worker:<your-worker-password>@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require
   ```
   *(Note: If your database password contains special characters like `@`, URL-encode it as `%40`)*
 
-### 3. Local Development (Optional)
+### 3. Local Development & Testing
 ```bash
-# Run unit tests
+# Run automated tests
 go test -v ./...
 
-# Run a local monitoring cycle
+# Build the executable
+go build -v -o bin/pulse ./cmd/pulse
+
+# Execute a local monitoring cycle
 $env:DATABASE_URL="your_connection_string"
 go run ./cmd/pulse
 ```
+
+---
+
+## License
+
+This project is open-source and available under the [MIT License](LICENSE).

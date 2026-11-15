@@ -49,13 +49,31 @@ func (m *MockRepository) AcquireAdvisoryLock(ctx context.Context, lockKey int64)
 	return unlock, true, nil
 }
 
-func (m *MockRepository) ClaimDueMonitors(ctx context.Context) ([]model.Monitor, error) {
+func (m *MockRepository) ClaimDueMonitors(ctx context.Context, limit int) ([]model.Monitor, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	res := m.dueMonitors
-	m.dueMonitors = nil // Claimed
+	if limit <= 0 || limit > len(m.dueMonitors) {
+		limit = len(m.dueMonitors)
+	}
+
+	res := m.dueMonitors[:limit]
+	m.dueMonitors = m.dueMonitors[limit:]
 	return res, nil
+}
+
+func (m *MockRepository) MarkStaleMonitors(ctx context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var count int64
+	for _, mon := range m.monitors {
+		if !mon.IsPaused && mon.CurrentStatus != model.StatusUnknown && checker.IsStale(mon.LastCheckedAt, mon.IntervalMinutes) {
+			mon.CurrentStatus = model.StatusUnknown
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (m *MockRepository) IsMonitorInMaintenance(ctx context.Context, userID, monitorID string, at time.Time) (bool, error) {
@@ -83,6 +101,8 @@ func (m *MockRepository) ProcessIncidentAndStatus(ctx context.Context, mon *mode
 	if existing, ok := m.monitors[mon.ID]; ok {
 		existing.CurrentStatus = finalStatus
 		existing.LastCheckedAt = &checkedAt
+		nextCheck := checkedAt.Add(time.Duration(existing.IntervalMinutes) * time.Minute)
+		existing.NextCheckAt = &nextCheck
 	}
 
 	// 1. If Down outside maintenance -> create incident if none active
@@ -149,7 +169,7 @@ func TestEngine_SuccessRun(t *testing.T) {
 	repo.monitors[mon.ID] = &mon
 
 	chk := checker.NewCheckerWithClient(server.Client(), 10*time.Millisecond, true)
-	cfg := &config.Config{Concurrency: 1, LockKey: 123}
+	cfg := &config.Config{Concurrency: 1, BatchSize: 10, LockKey: 123}
 
 	eng := NewEngine(cfg, repo, chk)
 	if err := eng.Run(context.Background()); err != nil {
@@ -167,6 +187,9 @@ func TestEngine_SuccessRun(t *testing.T) {
 	}
 	if len(repo.incidents) != 0 {
 		t.Errorf("expected 0 incidents, got %d", len(repo.incidents))
+	}
+	if repo.monitors["m-1"].NextCheckAt == nil {
+		t.Errorf("expected NextCheckAt to be populated after probe")
 	}
 }
 
@@ -192,7 +215,7 @@ func TestEngine_IncidentCreationAndRecovery(t *testing.T) {
 	repo.monitors[mon.ID] = &mon
 
 	chk := checker.NewCheckerWithClient(server.Client(), 10*time.Millisecond, true)
-	cfg := &config.Config{Concurrency: 1, LockKey: 123}
+	cfg := &config.Config{Concurrency: 1, BatchSize: 10, LockKey: 123}
 
 	eng := NewEngine(cfg, repo, chk)
 
@@ -255,7 +278,7 @@ func TestEngine_MaintenanceWindowSuppression(t *testing.T) {
 	repo.maintenance[mon.ID] = true // Active maintenance
 
 	chk := checker.NewCheckerWithClient(server.Client(), 10*time.Millisecond, true)
-	cfg := &config.Config{Concurrency: 1, LockKey: 123}
+	cfg := &config.Config{Concurrency: 1, BatchSize: 10, LockKey: 123}
 
 	eng := NewEngine(cfg, repo, chk)
 
@@ -274,6 +297,74 @@ func TestEngine_MaintenanceWindowSuppression(t *testing.T) {
 	// Normal outage incident is SUPPRESSED
 	if len(repo.incidents) != 0 {
 		t.Errorf("expected 0 incidents during maintenance, got %d", len(repo.incidents))
+	}
+}
+
+func TestEngine_StaleMonitorDetection(t *testing.T) {
+	repo := NewMockRepository()
+	staleTime := time.Now().Add(-30 * time.Minute) // Grace for 5m interval is 5*2+10 = 20m. 30m is stale.
+
+	staleMon := model.Monitor{
+		ID:              "m-stale",
+		UserID:          "u-1",
+		Name:            "Stale Monitor",
+		URL:             "http://example.com/health",
+		IntervalMinutes: 5,
+		CurrentStatus:   model.StatusUp,
+		LastCheckedAt:   &staleTime,
+	}
+	repo.monitors[staleMon.ID] = &staleMon
+
+	cfg := &config.Config{Concurrency: 1, BatchSize: 10, LockKey: 123}
+	eng := NewEngine(cfg, repo, nil)
+
+	if err := eng.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
+
+	if repo.monitors["m-stale"].CurrentStatus != model.StatusUnknown {
+		t.Errorf("expected stale monitor to be marked UNKNOWN, got %s", repo.monitors["m-stale"].CurrentStatus)
+	}
+}
+
+func TestEngine_BoundedBatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	repo := NewMockRepository()
+	for i := 1; i <= 5; i++ {
+		id := "m-" + string(rune('0'+i))
+		m := model.Monitor{
+			ID:                  id,
+			UserID:              "u-1",
+			Name:                "Batch Service " + id,
+			URL:                 server.URL,
+			IntervalMinutes:     5,
+			TimeoutSeconds:      2,
+			DegradedThresholdMs: 1000,
+		}
+		repo.dueMonitors = append(repo.dueMonitors, m)
+		repo.monitors[id] = &m
+	}
+
+	chk := checker.NewCheckerWithClient(server.Client(), 10*time.Millisecond, true)
+	// Set BatchSize to 3
+	cfg := &config.Config{Concurrency: 2, BatchSize: 3, LockKey: 123}
+	eng := NewEngine(cfg, repo, chk)
+
+	if err := eng.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
+
+	// Exactly 3 monitors should have been processed
+	if len(repo.checks) != 3 {
+		t.Fatalf("expected 3 checks from bounded batch, got %d", len(repo.checks))
+	}
+	// 2 remaining monitors must remain due!
+	if len(repo.dueMonitors) != 2 {
+		t.Fatalf("expected 2 unprocessed monitors to remain due, got %d", len(repo.dueMonitors))
 	}
 }
 

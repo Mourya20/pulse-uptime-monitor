@@ -13,7 +13,8 @@ import (
 
 // Repository defines all database interactions required by the monitoring engine.
 type Repository interface {
-	ClaimDueMonitors(ctx context.Context) ([]model.Monitor, error)
+	ClaimDueMonitors(ctx context.Context, limit int) ([]model.Monitor, error)
+	MarkStaleMonitors(ctx context.Context) (int64, error)
 	IsMonitorInMaintenance(ctx context.Context, userID, monitorID string, at time.Time) (bool, error)
 	RecordCheck(ctx context.Context, check *model.Check) error
 	ProcessIncidentAndStatus(ctx context.Context, m *model.Monitor, res checker.Result, inMaintenance bool, checkedAt time.Time) error
@@ -91,14 +92,14 @@ func (d *PgxDB) AcquireAdvisoryLock(ctx context.Context, lockKey int64) (func(),
 	return unlock, true, nil
 }
 
-// ClaimDueMonitors selects due monitors and atomically advances their next_check_at
-// in a short transaction, preventing duplicate processing and catch-up bursts.
-func (d *PgxDB) ClaimDueMonitors(ctx context.Context) ([]model.Monitor, error) {
-	tx, err := d.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction to claim monitors: %w", err)
+// ClaimDueMonitors selects due monitors up to limit.
+// Note: next_check_at is intentionally NOT advanced here. It is advanced in
+// ProcessIncidentAndStatus only after each individual monitor is actually probed.
+// This prevents monitors from being skipped if the engine times out or fails midway.
+func (d *PgxDB) ClaimDueMonitors(ctx context.Context, limit int) ([]model.Monitor, error) {
+	if limit <= 0 {
+		limit = 100
 	}
-	defer tx.Rollback(ctx)
 
 	query := `
 		SELECT id, user_id, name, url, interval_minutes, timeout_seconds, degraded_threshold_ms,
@@ -107,18 +108,16 @@ func (d *PgxDB) ClaimDueMonitors(ctx context.Context) ([]model.Monitor, error) {
 		WHERE is_paused = false
 		  AND (next_check_at IS NULL OR next_check_at <= NOW())
 		ORDER BY next_check_at ASC NULLS FIRST
-		FOR UPDATE SKIP LOCKED;
+		LIMIT $1;
 	`
 
-	rows, err := tx.Query(ctx, query)
+	rows, err := d.pool.Query(ctx, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying due monitors failed: %w", err)
 	}
 	defer rows.Close()
 
 	var monitors []model.Monitor
-	var monitorIDs []string
-
 	for rows.Next() {
 		var m model.Monitor
 		err := rows.Scan(
@@ -131,30 +130,31 @@ func (d *PgxDB) ClaimDueMonitors(ctx context.Context) ([]model.Monitor, error) {
 			return nil, fmt.Errorf("scanning monitor row failed: %w", err)
 		}
 		monitors = append(monitors, m)
-		monitorIDs = append(monitorIDs, m.ID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows iteration failed: %w", err)
 	}
 
-	// Advance next_check_at for all claimed monitors to NOW() + interval
-	if len(monitorIDs) > 0 {
-		updateQuery := `
-			UPDATE public.monitors
-			SET next_check_at = NOW() + (interval_minutes || ' minutes')::INTERVAL,
-			    updated_at = NOW()
-			WHERE id = ANY($1);
-		`
-		if _, err := tx.Exec(ctx, updateQuery, monitorIDs); err != nil {
-			return nil, fmt.Errorf("failed to advance next_check_at for claimed monitors: %w", err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("failed to commit claimed monitors transaction: %w", err)
-	}
-
 	return monitors, nil
+}
+
+// MarkStaleMonitors marks unpaused monitors whose last check exceeded the grace period
+// (interval * 2 + 10 minutes) as UNKNOWN.
+func (d *PgxDB) MarkStaleMonitors(ctx context.Context) (int64, error) {
+	query := `
+		UPDATE public.monitors
+		SET current_status = 'UNKNOWN',
+		    updated_at = NOW()
+		WHERE is_paused = false
+		  AND current_status != 'UNKNOWN'
+		  AND last_checked_at IS NOT NULL
+		  AND last_checked_at < NOW() - ((interval_minutes * 2 + 10) || ' minutes')::INTERVAL;
+	`
+	tag, err := d.pool.Exec(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("failed to mark stale monitors: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // IsMonitorInMaintenance checks if a monitor or all monitors for the user are in an active maintenance window.
@@ -196,6 +196,7 @@ func (d *PgxDB) RecordCheck(ctx context.Context, c *model.Check) error {
 }
 
 // ProcessIncidentAndStatus manages incident transitions and updates monitor status in a single transaction.
+// Crucially, it advances next_check_at here only after the probe has completed.
 func (d *PgxDB) ProcessIncidentAndStatus(ctx context.Context, m *model.Monitor, res checker.Result, inMaintenance bool, checkedAt time.Time) error {
 	tx, err := d.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -270,11 +271,12 @@ func (d *PgxDB) ProcessIncidentAndStatus(ctx context.Context, m *model.Monitor, 
 		}
 	}
 
-	// 2. Update monitor status and last_checked_at
+	// 2. Update monitor status, last_checked_at, and advance next_check_at to checkedAt + interval
 	updateMonitor := `
 		UPDATE public.monitors
 		SET current_status = $1,
 		    last_checked_at = $2,
+		    next_check_at = $2 + (interval_minutes || ' minutes')::INTERVAL,
 		    updated_at = $2
 		WHERE id = $3;
 	`

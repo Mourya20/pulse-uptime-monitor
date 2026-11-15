@@ -13,7 +13,8 @@ import (
 )
 
 const (
-	DefaultTimeoutSeconds    = 90
+	DefaultTimeoutSeconds    = 15
+	MaxProbeTimeoutSeconds   = 30
 	DefaultDegradedThreshold = 1000
 	DefaultRetryBackoff      = 1500 * time.Millisecond
 	MaxResponseBodyReadLimit = 4096
@@ -140,6 +141,9 @@ func (c *Checker) Check(ctx context.Context, m *model.Monitor, inMaintenance boo
 	if timeoutSec <= 0 {
 		timeoutSec = DefaultTimeoutSeconds
 	}
+	if timeoutSec > MaxProbeTimeoutSeconds {
+		timeoutSec = MaxProbeTimeoutSeconds
+	}
 	timeout := time.Duration(timeoutSec) * time.Second
 
 	threshold := m.DegradedThresholdMs
@@ -177,17 +181,23 @@ func (c *Checker) Check(ctx context.Context, m *model.Monitor, inMaintenance boo
 
 	isRetry := false
 
-	// Retry once if retryable
-	if IsRetryable(code, err) {
+	// Retry once if retryable and context not canceled
+	if IsRetryable(code, err) && ctx.Err() == nil {
 		select {
 		case <-ctx.Done():
 			// Parent context canceled, abort retry
 		case <-time.After(c.backoff):
-			isRetry = true
-			code, duration, err = c.executeAttempt(ctx, client, m.URL, timeout)
-			ms = int(duration.Milliseconds())
-			if ms == 0 && err == nil {
-				ms = 1
+			if ctx.Err() == nil {
+				isRetry = true
+				retryTimeout := timeout
+				if retryTimeout > 10*time.Second {
+					retryTimeout = 10 * time.Second
+				}
+				code, duration, err = c.executeAttempt(ctx, client, m.URL, retryTimeout)
+				ms = int(duration.Milliseconds())
+				if ms == 0 && err == nil {
+					ms = 1
+				}
 			}
 		}
 	}

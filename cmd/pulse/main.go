@@ -39,9 +39,13 @@ func main() {
 	chk := checker.NewChecker()
 	eng := engine.NewEngine(cfg, dbPool, chk)
 
-	// 5. Execute scheduled monitoring cycle
+	// 5. Execute scheduled monitoring cycle with 4-minute timeout buffer
+	// (Guarantees clean completion before GitHub Actions 5-minute timeout)
+	cycleCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancel()
+
 	runStart := time.Now()
-	if err := eng.Run(ctx); err != nil {
+	if err := eng.Run(cycleCtx); err != nil {
 		log.Fatalf("[Pulse] Monitoring cycle finished with errors: %v (elapsed: %v)\n", err, time.Since(runStart))
 	}
 

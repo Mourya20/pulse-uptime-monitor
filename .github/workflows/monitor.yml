@@ -5,6 +5,10 @@ on:
     # Trigger every 5 minutes with a 2-minute offset (e.g. :02, :07, :12, :17...)
     - cron: '2/5 * * * *'
   workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 # Prevent concurrent overlapping workflow executions
 concurrency:
@@ -17,7 +21,7 @@ permissions:
 
 jobs:
   monitor:
-    name: Probe Due Monitors
+    name: Test, Build & Probe
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -31,10 +35,14 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Run automated unit tests
+        run: go test -v ./...
+
       - name: Build monitoring executable
         run: go build -v -o bin/pulse ./cmd/pulse
 
       - name: Execute keep-alive probes
+        if: ${{ secrets.DATABASE_URL != '' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: ./bin/pulse

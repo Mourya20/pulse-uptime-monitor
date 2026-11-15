@@ -10,8 +10,8 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- Stores user-level dashboard preferences and monitoring defaults.
 CREATE TABLE IF NOT EXISTS public.app_settings (
     user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-    default_interval_minutes INT NOT NULL DEFAULT 15 CHECK (default_interval_minutes BETWEEN 1 AND 1440),
-    default_timeout_seconds INT NOT NULL DEFAULT 90 CHECK (default_timeout_seconds BETWEEN 5 AND 120),
+    default_interval_minutes INT NOT NULL DEFAULT 5 CHECK (default_interval_minutes BETWEEN 5 AND 1440),
+    default_timeout_seconds INT NOT NULL DEFAULT 15 CHECK (default_timeout_seconds BETWEEN 5 AND 120),
     degraded_threshold_ms INT NOT NULL DEFAULT 1000 CHECK (degraded_threshold_ms >= 100),
     dashboard_timezone TEXT NOT NULL DEFAULT 'UTC',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS public.monitors (
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     name TEXT NOT NULL CHECK (char_length(name) >= 1 AND char_length(name) <= 100),
     url TEXT NOT NULL CHECK (url ~* '^https?://'),
-    interval_minutes INT NOT NULL DEFAULT 5 CHECK (interval_minutes BETWEEN 1 AND 1440),
-    timeout_seconds INT NOT NULL DEFAULT 90 CHECK (timeout_seconds BETWEEN 5 AND 120),
+    interval_minutes INT NOT NULL DEFAULT 5 CHECK (interval_minutes BETWEEN 5 AND 1440),
+    timeout_seconds INT NOT NULL DEFAULT 15 CHECK (timeout_seconds BETWEEN 5 AND 120),
     degraded_threshold_ms INT NOT NULL DEFAULT 1000 CHECK (degraded_threshold_ms >= 100),
     is_paused BOOLEAN NOT NULL DEFAULT false,
     current_status TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK (current_status IN ('UP', 'DEGRADED', 'DOWN', 'PAUSED', 'MAINTENANCE', 'UNKNOWN')),
