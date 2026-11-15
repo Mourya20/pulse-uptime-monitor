@@ -848,7 +848,22 @@
     $('#overview').classList.remove('det');
   };
 
-  $('nav a[data-p=overview]').addEventListener('click', () => {
+  const goHome = e => {
+    if (e) e.preventDefault();
+    state.currentMonitorId = null;
+    $('#overview').classList.remove('det');
+    if (location.hash === '#overview') {
+      route();
+    } else {
+      location.hash = '#overview';
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  $('#logo-link')?.addEventListener('click', goHome);
+  $('#crumb-home')?.addEventListener('click', goHome);
+
+  $('nav a[data-p=overview]')?.addEventListener('click', () => {
     state.currentMonitorId = null;
     $('#overview').classList.remove('det');
   });

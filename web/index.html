@@ -8,12 +8,12 @@
   <meta http-equiv="Expires" content="0">
   <title>Pulse – Uptime Monitor</title>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
-  <link rel="stylesheet" href="css/style.css?v=1.2.0">
+  <link rel="stylesheet" href="css/style.css?v=1.2.1">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
   <aside>
-    <div class="logo"><i></i><b>Pulse</b></div>
+    <a href="#overview" class="logo" id="logo-link" title="Pulse – Home"><i></i><b>Pulse</b></a>
     <nav>
       <a href="#overview" data-p="overview"><svg viewBox="0 0 16 16"><path d="M2 8h3l2-5 2 10 2-5h3"/></svg><span>Overview</span></a>
       <a href="#monitors" data-p="monitors"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="8" rx="1"/><path d="M6 14h4"/></svg><span>Monitors</span></a>
@@ -29,7 +29,7 @@
 
   <main>
     <div class="top">
-      <div class="crumb">Pulse / <b id="crumb">Overview</b></div>
+      <div class="crumb"><a href="#overview" id="crumb-home" style="color:inherit;text-decoration:none;cursor:pointer">Pulse</a> / <b id="crumb">Overview</b></div>
       <div class="search" id="quick-search">Search…<kbd>⌘K</kbd></div>
     </div>
 
@@ -462,7 +462,7 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="js/config.js?v=1.2.0"></script>
-  <script src="js/app.js?v=1.2.0"></script>
+  <script src="js/config.js?v=1.2.1"></script>
+  <script src="js/app.js?v=1.2.1"></script>
 </body>
 </html>
