@@ -63,12 +63,37 @@ CREATE POLICY "Users can view checks for their monitors"
     TO authenticated
     USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can insert checks for their monitors" ON public.checks;
+CREATE POLICY "Users can insert checks for their monitors"
+    ON public.checks FOR INSERT
+    TO authenticated
+    WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can delete checks for their monitors" ON public.checks;
+CREATE POLICY "Users can delete checks for their monitors"
+    ON public.checks FOR DELETE
+    TO authenticated
+    USING (auth.uid() = user_id);
+
 -- 4. Incidents Policies
 DROP POLICY IF EXISTS "Users can view their own incidents" ON public.incidents;
 CREATE POLICY "Users can view their own incidents"
     ON public.incidents FOR SELECT
     TO authenticated
     USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can insert their own incidents" ON public.incidents;
+CREATE POLICY "Users can insert their own incidents"
+    ON public.incidents FOR INSERT
+    TO authenticated
+    WITH CHECK (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Users can update their own incidents" ON public.incidents;
+CREATE POLICY "Users can update their own incidents"
+    ON public.incidents FOR UPDATE
+    TO authenticated
+    USING (auth.uid() = user_id)
+    WITH CHECK (auth.uid() = user_id);
 
 -- 5. Maintenance Windows Policies
 DROP POLICY IF EXISTS "Users can view their maintenance windows" ON public.maintenance_windows;

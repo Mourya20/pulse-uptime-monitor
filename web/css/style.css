@@ -300,7 +300,7 @@ h1 {
 .bgg { background: var(--g); }
 .bgr { background: var(--r); }
 .bgy { background: var(--y); }
-.bgm { background: #707070; }
+.bgm { background: #222222; }
 
 .strip {
   display: flex;
@@ -440,8 +440,6 @@ th {
   border-bottom: 1px solid var(--bd);
   text-transform: uppercase;
   letter-spacing: .04em;
-  position: sticky;
-  top: 48px;
   background: var(--sf);
 }
 
@@ -450,6 +448,7 @@ td {
   height: 44px;
   border-bottom: 1px solid var(--bd);
   white-space: nowrap;
+  vertical-align: middle;
 }
 
 tr:last-child td {

@@ -80,10 +80,14 @@
           <button class="btn" id="back">← All monitors</button>
           <h1 id="dname">Monitor</h1>
         </div>
-        <div class="seg" id="rng">
-          <button class="on" data-range="24h">24h</button>
-          <button data-range="7d">7d</button>
-          <button data-range="30d">30d</button>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn p sm" id="btn-ping-now" title="Send an immediate keep-alive probe to this endpoint">⚡ Ping now</button>
+          <button class="btn sm" id="btn-seed-sample" title="Generate 24h sample checks to populate graphs and metrics">Generate 24h data</button>
+          <div class="seg" id="rng">
+            <button class="on" data-range="24h">24h</button>
+            <button data-range="7d">7d</button>
+            <button data-range="30d">30d</button>
+          </div>
         </div>
       </div>
 
@@ -407,16 +411,23 @@
 
   <!-- Supabase Login / Setup Modal -->
   <div class="ov" id="auth-ov">
-    <div class="modal" style="width:380px">
+    <div class="modal" style="width:420px">
       <h2>Sign in to Pulse</h2>
       <div class="error-banner" id="auth-err"></div>
       
       <div id="auth-config-fields" style="display:none">
         <label>Supabase Project URL</label>
         <input class="in mono" id="auth-supa-url" placeholder="https://xyz.supabase.co">
+        <div class="sub" style="font-size:11px;margin:2px 0 8px">Project Settings &gt; API &gt; Project URL (https://&lt;id&gt;.supabase.co, <b>NOT</b> postgresql://)</div>
+        
         <label>Supabase Anon Key</label>
         <input class="in mono" id="auth-supa-key" placeholder="eyJhbGciOiJIUzI1NiIsIn...">
-        <div style="border-top:1px solid var(--bd);margin:16px 0"></div>
+        <div class="sub" style="font-size:11px;margin:2px 0 8px">Project Settings &gt; API &gt; Project API keys &gt; <code>anon</code> public key</div>
+        
+        <div style="display:flex;justify-content:flex-end;margin-top:6px">
+          <button class="btn sm" id="auth-reset-config" type="button" style="font-size:11px;color:var(--t3)">Clear saved config</button>
+        </div>
+        <div style="border-top:1px solid var(--bd);margin:12px 0"></div>
       </div>
 
       <label>Owner Email</label>
@@ -424,8 +435,8 @@
       <label>Password</label>
       <input class="in mono" id="auth-pwd" type="password">
       <div class="act">
-        <button class="btn" id="auth-setup-toggle" style="margin-right:auto">Config</button>
-        <button class="btn p" id="auth-login">Sign in</button>
+        <button class="btn" id="auth-setup-toggle" type="button" style="margin-right:auto">Config</button>
+        <button class="btn p" id="auth-login" type="button">Sign in</button>
       </div>
     </div>
   </div>

@@ -157,6 +157,36 @@
       return t >= windowStart && t <= now && (c.status === 'UP' || c.status === 'DEGRADED');
     });
 
+    const m = state.monitors.find(mon => mon.id === monitorId);
+    const hasAnyChecks = state.checks.some(c => c.monitor_id === monitorId);
+    const isPending = !m?.last_checked_at && !hasAnyChecks;
+
+    if (isPending) {
+      return {
+        uptimePct: null,
+        downSec: 0,
+        incidentCount: 0,
+        mtbfHours: -1,
+        avgLat: 0,
+        minLat: 0,
+        maxLat: 0,
+        hasData: false
+      };
+    }
+
+    // All checks for this monitor within window
+    const allChecksInWindow = state.checks.filter(c => {
+      if (c.monitor_id !== monitorId) return false;
+      const t = new Date(c.checked_at).getTime();
+      return t >= windowStart && t <= now;
+    });
+
+    let calculatedUptime = uptimePct;
+    if (relevantIncidents.length === 0 && allChecksInWindow.length > 0) {
+      const successfulChecks = allChecksInWindow.filter(c => c.status === 'UP' || c.status === 'DEGRADED').length;
+      calculatedUptime = (successfulChecks / allChecksInWindow.length) * 100;
+    }
+
     let avgLat = 0, minLat = 0, maxLat = 0;
     if (monChecks.length > 0) {
       minLat = Infinity;
@@ -178,13 +208,14 @@
     }
 
     return {
-      uptimePct: parseFloat(uptimePct.toFixed(3)),
+      uptimePct: parseFloat(calculatedUptime.toFixed(2)),
       downSec: Math.floor(totalDownMs / 1000),
       incidentCount: relevantIncidents.length,
       mtbfHours,
       avgLat,
       minLat,
-      maxLat
+      maxLat,
+      hasData: true
     };
   }
 
@@ -218,21 +249,54 @@
         return t >= slotStart && t <= slotEnd;
       });
 
-      const hasDegraded = slotChecks.some(c => c.status === 'DEGRADED');
-      if (hasDegraded) {
-        bars.push({ color: 'bgy', label: `Degraded · ${i}h ago` });
+      if (slotChecks.length > 0) {
+        const hasDegraded = slotChecks.some(c => c.status === 'DEGRADED');
+        const hasDown = slotChecks.some(c => c.status === 'DOWN');
+        if (hasDown) {
+          bars.push({ color: 'bgr', label: `Down · ${i}h ago` });
+        } else if (hasDegraded) {
+          bars.push({ color: 'bgy', label: `Degraded · ${i}h ago` });
+        } else {
+          bars.push({ color: 'bgg', label: `Operational · ${i}h ago` });
+        }
       } else {
-        bars.push({ color: 'bgg', label: `Operational · ${i}h ago` });
+        // No checks recorded in this hour slot
+        bars.push({ color: 'bgm', label: `No checks · ${i}h ago` });
       }
     }
 
     return bars;
   }
 
+  // Helper: Sanitize Supabase Project URL
+  // Corrects common user input mistakes (pasting postgresql:// URI, db.host, missing https://, trailing slashes)
+  function sanitizeSupabaseUrl(rawUrl) {
+    if (!rawUrl) return '';
+    let url = rawUrl.trim().replace(/^["']|["']$/g, '');
+
+    // Extract project ref if user pasted database URI or direct host
+    // e.g. postgresql://postgres:...@db.abcdefgh.supabase.co:5432/postgres or db.abcdefgh.supabase.co
+    const match = url.match(/(?:db\.)?([a-z0-9-]+)\.supabase\.co/i);
+    if (match && match[1]) {
+      return `https://${match[1]}.supabase.co`;
+    }
+
+    if (!/^https?:\/\//i.test(url)) {
+      url = 'https://' + url;
+    }
+    return url.replace(/\/+$/, '');
+  }
+
   // Supabase Auth and Client Initialization
   async function initAuth() {
-    let supabaseUrl = window.PULSE_CONFIG?.supabaseUrl || localStorage.getItem('PULSE_SUPABASE_URL');
-    let supabaseKey = window.PULSE_CONFIG?.supabaseAnonKey || localStorage.getItem('PULSE_SUPABASE_ANON_KEY');
+    let supabaseUrl = window.PULSE_CONFIG?.supabaseUrl || localStorage.getItem('PULSE_SUPABASE_URL') || '';
+    let supabaseKey = window.PULSE_CONFIG?.supabaseAnonKey || localStorage.getItem('PULSE_SUPABASE_ANON_KEY') || '';
+
+    // Pre-populate input fields
+    const urlInput = $('#auth-supa-url');
+    const keyInput = $('#auth-supa-key');
+    if (urlInput) urlInput.value = supabaseUrl;
+    if (keyInput) keyInput.value = supabaseKey;
 
     if (!supabaseUrl || !supabaseKey) {
       $('#auth-config-fields').style.display = 'block';
@@ -240,10 +304,13 @@
       return;
     }
 
+    supabaseUrl = sanitizeSupabaseUrl(supabaseUrl);
+
     try {
       state.client = window.supabase.createClient(supabaseUrl, supabaseKey);
       const { data: { session }, error } = await state.client.auth.getSession();
-      if (error || !session) {
+      if (error) throw error;
+      if (!session) {
         $('#auth-ov').classList.add('on');
         return;
       }
@@ -255,7 +322,11 @@
       startPolling();
     } catch (err) {
       console.error('Failed to initialize Supabase client:', err);
-      $('#auth-err').textContent = err.message || 'Failed to connect to Supabase.';
+      let msg = err.message || 'Failed to connect to Supabase.';
+      if (msg.includes('Failed to fetch') || msg.includes('fetch')) {
+        msg = 'Failed to fetch: Cannot connect to Supabase. Check: 1) URL must be https://<id>.supabase.co (not the postgresql:// connection string), 2) Check if project is paused in Supabase, 3) Disable any ad-blockers.';
+      }
+      $('#auth-err').textContent = msg;
       $('#auth-err').classList.add('on');
       $('#auth-config-fields').style.display = 'block';
       $('#auth-ov').classList.add('on');
@@ -268,16 +339,23 @@
     errBanner.classList.remove('on');
 
     const configFields = $('#auth-config-fields');
-    if (configFields.style.display !== 'none') {
-      const url = $('#auth-supa-url').value.trim();
-      const key = $('#auth-supa-key').value.trim();
-      if (url && key) {
-        localStorage.setItem('PULSE_SUPABASE_URL', url);
-        localStorage.setItem('PULSE_SUPABASE_ANON_KEY', key);
-        window.PULSE_CONFIG.supabaseUrl = url;
-        window.PULSE_CONFIG.supabaseAnonKey = key;
-        state.client = window.supabase.createClient(url, key);
+    let url = ($('#auth-supa-url').value || '').trim();
+    let key = ($('#auth-supa-key').value || '').trim();
+
+    if (configFields.style.display !== 'none' || !state.client) {
+      if (!url || !key) {
+        errBanner.textContent = 'Please configure Supabase URL and Publishable Key.';
+        errBanner.classList.add('on');
+        $('#auth-config-fields').style.display = 'block';
+        return;
       }
+      url = sanitizeSupabaseUrl(url);
+      $('#auth-supa-url').value = url;
+      localStorage.setItem('PULSE_SUPABASE_URL', url);
+      localStorage.setItem('PULSE_SUPABASE_ANON_KEY', key);
+      window.PULSE_CONFIG.supabaseUrl = url;
+      window.PULSE_CONFIG.supabaseAnonKey = key;
+      state.client = window.supabase.createClient(url, key);
     }
 
     if (!state.client) {
@@ -304,10 +382,29 @@
       await loadAllData();
       startPolling();
     } catch (err) {
-      errBanner.textContent = err.message || 'Invalid credentials.';
+      let msg = err.message || 'Invalid credentials.';
+      if (msg.includes('Failed to fetch') || msg.includes('fetch')) {
+        msg = 'Failed to fetch: Unable to reach Supabase. Check: 1) URL must be https://<id>.supabase.co (NOT the postgresql:// database string), 2) Check if project is paused in Supabase Dashboard, 3) Disable any ad-blockers.';
+        $('#auth-config-fields').style.display = 'block';
+      }
+      errBanner.textContent = msg;
       errBanner.classList.add('on');
     }
   };
+
+  // Reset configuration button
+  const resetBtn = $('#auth-reset-config');
+  if (resetBtn) {
+    resetBtn.onclick = () => {
+      localStorage.removeItem('PULSE_SUPABASE_URL');
+      localStorage.removeItem('PULSE_SUPABASE_ANON_KEY');
+      $('#auth-supa-url').value = '';
+      $('#auth-supa-key').value = '';
+      state.client = null;
+      $('#auth-err').classList.remove('on');
+      showToast('Configuration cleared');
+    };
+  }
 
   $('#auth-setup-toggle').onclick = () => {
     const fields = $('#auth-config-fields');
@@ -329,7 +426,50 @@
       if (state.client && state.user) {
         await loadAllData(true);
       }
-    }, 30000);
+    }, 15000); // Live poll every 15s
+
+    // Real-time 1-second ticker for live moving timers & countdowns
+    if (state.tickerInterval) clearInterval(state.tickerInterval);
+    state.tickerInterval = setInterval(() => {
+      // 1. If viewing detail page, tick the relative times and next-check countdown
+      if (state.currentMonitorId) {
+        const m = state.monitors.find(mon => mon.id === state.currentMonitorId);
+        if (m) {
+          if (m.last_checked_at) {
+            const lcEl = $('#d-lastcheck');
+            if (lcEl) lcEl.textContent = formatTimeAgo(m.last_checked_at);
+            const sinceEl = $('#d-since');
+            if (sinceEl) sinceEl.textContent = calculateStateDurationText(m);
+          }
+
+          // Countdown to next check
+          const nextCheckStr = m.next_check_at;
+          const intervalEl = $('#d-interval');
+          if (intervalEl && nextCheckStr) {
+            const diffSec = Math.floor((new Date(nextCheckStr).getTime() - Date.now()) / 1000);
+            if (diffSec > 0) {
+              const min = Math.floor(diffSec / 60);
+              const sec = diffSec % 60;
+              intervalEl.textContent = `Next in ${min}m ${sec < 10 ? '0' : ''}${sec}s (every ${m.interval_minutes}m)`;
+            } else {
+              intervalEl.textContent = `Checking soon… (every ${m.interval_minutes}m)`;
+            }
+          }
+        }
+      }
+
+      // 2. Check if any monitor is due for an automated keep-alive probe from this dashboard
+      const now = Date.now();
+      state.monitors.forEach(mon => {
+        if (!mon.is_paused && mon.next_check_at) {
+          const dueTime = new Date(mon.next_check_at).getTime();
+          // If due within 2s and hasn't been probed in the last 15s
+          if (now >= dueTime && (!mon.last_checked_at || (now - new Date(mon.last_checked_at).getTime() > 15000))) {
+            triggerManualPing(mon.id);
+          }
+        }
+      });
+    }, 1000);
   }
 
   // Load all application data from Supabase
@@ -412,6 +552,7 @@
     let upCount = 0, downCount = 0, degradedCount = 0;
     let totalUptime = 0;
 
+    let validUptimeCount = 0;
     state.monitors.forEach(m => {
       const st = m.is_paused ? 'PAUSED' : (m.current_status || 'UNKNOWN');
       if (st === 'UP') upCount++;
@@ -419,16 +560,19 @@
       else if (st === 'DEGRADED') degradedCount++;
 
       const stats = calculateMonitorUptime(m.id, 86400000);
-      totalUptime += stats.uptimePct;
+      if (stats.uptimePct !== null) {
+        totalUptime += stats.uptimePct;
+        validUptimeCount++;
+      }
     });
 
-    const avgUptime = total > 0 ? (totalUptime / total).toFixed(2) : '100.00';
+    const avgUptime = validUptimeCount > 0 ? (totalUptime / validUptimeCount).toFixed(2) + '%' : '—';
 
     $('#sm-total').textContent = total;
     $('#sm-up').textContent = upCount;
     $('#sm-down').textContent = downCount;
     $('#sm-degraded').textContent = degradedCount;
-    $('#sm-uptime').textContent = `${avgUptime}%`;
+    $('#sm-uptime').textContent = avgUptime;
 
     // Fleet status indicator in footer
     const footDot = $('#fleet-dot');
@@ -459,11 +603,11 @@
         return `
           <tr class="clk" data-id="${m.id}">
             <td>
-              <span class="dot ${s.bg}"></span>${escapeHtml(m.name)}
+              <span class="dot ${s.bg}"></span><b>${escapeHtml(m.name || 'Unnamed')}</b>
               <span class="mono" style="color:var(--t3);margin-left:10px;font-size:13px">${escapeHtml(host)}</span>
             </td>
             <td class="${s.cls}">${s.text}</td>
-            <td class="mono">${stats.uptimePct}%</td>
+            <td class="mono">${stats.uptimePct !== null ? stats.uptimePct + '%' : '—'}</td>
             <td>
               <span class="mini">
                 ${strip.map(b => `<i class="${b.color}" title="${b.label}"></i>`).join('')}
@@ -575,8 +719,10 @@
     const rangeTitle = state.selectedRange === '30d' ? 'Last 30 days' :
                        state.selectedRange === '7d' ? 'Last 7 days' : 'Last 24 hours';
     $('#d-rangetitle').textContent = rangeTitle;
-    $('#d-rangeuptime').textContent = `${rangeStats.uptimePct}%`;
-    $('#d-incdowntime').textContent = `${rangeStats.incidentCount} incidents · ${formatDuration(rangeStats.downSec)} down`;
+    $('#d-rangeuptime').textContent = rangeStats.uptimePct !== null ? `${rangeStats.uptimePct}%` : '—';
+    $('#d-incdowntime').textContent = rangeStats.hasData !== false
+      ? `${rangeStats.incidentCount} incidents · ${formatDuration(rangeStats.downSec)} down`
+      : 'Pending first check';
 
     // Hourly strip
     const stripBars = generate24HourStrip(m.id);
@@ -588,20 +734,29 @@
     const s365d = calculateMonitorUptime(m.id, 365 * 86400000);
 
     const setMetricCol = (el, pct) => {
+      if (pct === null) {
+        el.className = 'v mono';
+        el.textContent = '—';
+        return;
+      }
       el.className = 'v mono ' + (pct < 95 ? 'r' : pct < 99.5 ? 'y' : 'g');
       el.textContent = `${pct}%`;
     };
 
     setMetricCol($('#d-7d'), s7d.uptimePct);
-    $('#d-7d-inc').textContent = `${s7d.incidentCount} incident${s7d.incidentCount === 1 ? '' : 's'}`;
+    $('#d-7d-inc').textContent = s7d.hasData !== false
+      ? `${s7d.incidentCount} incident${s7d.incidentCount === 1 ? '' : 's'}`
+      : 'No checks yet';
 
     setMetricCol($('#d-30d'), s30d.uptimePct);
-    $('#d-30d-down').textContent = `${formatDuration(s30d.downSec)} down`;
+    $('#d-30d-down').textContent = s30d.hasData !== false
+      ? `${formatDuration(s30d.downSec)} down`
+      : 'No checks yet';
 
-    $('#d-365d').textContent = `${s365d.uptimePct}%`;
+    $('#d-365d').textContent = (s365d.hasData !== false && s365d.uptimePct !== null) ? `${s365d.uptimePct}%` : '—';
 
     $('#d-dtlabel').textContent = `Downtime (${state.selectedRange})`;
-    $('#d-dtval').textContent = formatDuration(rangeStats.downSec);
+    $('#d-dtval').textContent = rangeStats.hasData !== false ? formatDuration(rangeStats.downSec) : '—';
 
     $('#d-mtbflabel').textContent = `MTBF (${state.selectedRange})`;
     const mtbfEl = $('#d-mtbf');
@@ -664,10 +819,13 @@
     const tip = $('#tip');
 
     if (checksInRange.length === 0) {
-      svg.innerHTML = '<text x="400" y="110" fill="#707070" text-anchor="middle" font-size="14">No response time data in selected range</text>';
-      $('#ch-avg').textContent = '0 ms';
-      $('#ch-min').textContent = '0 ms';
-      $('#ch-max').textContent = '0 ms';
+      svg.innerHTML = `
+        <text x="400" y="95" fill="#707070" text-anchor="middle" font-size="14">No response time data recorded yet</text>
+        <text x="400" y="125" fill="#a1a1a1" text-anchor="middle" font-size="12">Click "⚡ Ping now" or "Generate 24h data" above to populate dynamic charts</text>
+      `;
+      $('#ch-avg').textContent = '—';
+      $('#ch-min').textContent = '—';
+      $('#ch-max').textContent = '—';
       return;
     }
 
@@ -702,15 +860,26 @@
     // Outage bands (regions where monitor was DOWN)
     for (let i = 0; i < N; i++) {
       if (checksInRange[i].status === 'DOWN') {
-        const x1 = Math.max(0, x(i) - (W / N) / 2);
-        const w = W / N;
+        const x1 = Math.max(0, x(i) - (W / Math.max(1, N)) / 2);
+        const w = W / Math.max(1, N);
         s += `<rect x="${x1}" width="${w}" y="0" height="${H - 24}" fill="rgba(238,0,0,.14)"/>`;
       }
     }
 
-    // Polyline
-    const points = checksInRange.map((c, i) => `${x(i)},${y(c.response_time_ms)}`).join(' ');
-    s += `<polyline fill="none" stroke="#00c853" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${points}"/>`;
+    if (N === 1) {
+      // Single check point
+      s += `<line x1="0" x2="${W}" y1="${y(latencies[0])}" stroke="#00c853" stroke-width="1.5" stroke-dasharray="4" vector-effect="non-scaling-stroke"/>`;
+      s += `<circle cx="${W / 2}" cy="${y(latencies[0])}" r="5" fill="#00c853"/>`;
+    } else {
+      // Polyline connecting points
+      const points = checksInRange.map((c, i) => `${x(i)},${y(c.response_time_ms)}`).join(' ');
+      s += `<polyline fill="none" stroke="#00c853" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${points}"/>`;
+      checksInRange.forEach((c, i) => {
+        const dotCol = c.status === 'DOWN' ? '#ee0000' : (c.status === 'DEGRADED' ? '#f5a623' : '#00c853');
+        s += `<circle cx="${x(i)}" cy="${y(c.response_time_ms)}" r="2.5" fill="${dotCol}"/>`;
+      });
+    }
+
     s += `<line id="cx2" y1="0" y2="${H - 24}" stroke="#555" vector-effect="non-scaling-stroke" style="display:none"/>`;
 
     svg.innerHTML = s;
@@ -746,6 +915,186 @@
       tip.style.display = 'none';
       const l = $('#cx2');
       if (l) l.style.display = 'none';
+    };
+  }
+
+  // Trigger an immediate keep-alive probe from the browser
+  async function triggerManualPing(monitorId, btnElement = null) {
+    const m = state.monitors.find(mon => mon.id === monitorId);
+    if (!m) return;
+
+    const originalBtnText = btnElement ? btnElement.innerHTML : null;
+    if (btnElement) {
+      btnElement.disabled = true;
+      btnElement.innerHTML = '⚡ Pinging…';
+    }
+
+    const tStart = performance.now();
+    let status = 'UP';
+    let statusCode = 200;
+    let errorMessage = null;
+
+    try {
+      try {
+        const resp = await fetch(m.url, { method: 'GET', cache: 'no-store' });
+        statusCode = resp.status;
+        if (!resp.ok) {
+          status = 'DOWN';
+          errorMessage = `HTTP ${resp.status} ${resp.statusText || ''}`.trim();
+        }
+      } catch (corsOrNetErr) {
+        // Fallback to no-cors mode to measure network roundtrip and wake target keep-alive
+        await fetch(m.url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
+        statusCode = 200;
+      }
+    } catch (err) {
+      status = 'DOWN';
+      statusCode = 0;
+      errorMessage = err.message || 'Service unreachable';
+    }
+
+    const durationMs = Math.max(1, Math.round(performance.now() - tStart));
+    const threshold = m.degraded_threshold_ms || state.settings.degraded_threshold_ms || 1000;
+    if (status === 'UP' && durationMs > threshold) {
+      status = 'DEGRADED';
+    }
+
+    const checkedAt = new Date().toISOString();
+    const checkRecord = {
+      id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('chk-' + Date.now()),
+      monitor_id: monitorId,
+      user_id: state.user?.id,
+      checked_at: checkedAt,
+      status,
+      status_code: statusCode,
+      response_time_ms: durationMs,
+      error_message: errorMessage,
+      is_retry: false
+    };
+
+    // Prepend check to local state immediately for instant dynamic UI update
+    state.checks.unshift(checkRecord);
+    m.current_status = status;
+    m.last_checked_at = checkedAt;
+
+    // Persist to Supabase if connected
+    if (state.client && state.user) {
+      state.client.from('checks').insert({
+        monitor_id: monitorId,
+        user_id: state.user.id,
+        checked_at: checkedAt,
+        status,
+        status_code: statusCode,
+        response_time_ms: durationMs,
+        error_message: errorMessage,
+        is_retry: false
+      }).then(({ error }) => {
+        if (error) console.warn('Supabase check insert:', error.message);
+      });
+
+      await state.client.from('monitors').update({
+        current_status: status,
+        last_checked_at: checkedAt,
+        next_check_at: new Date(Date.now() + m.interval_minutes * 60000).toISOString()
+      }).eq('id', monitorId);
+    }
+
+    renderOverview();
+    renderMonitors();
+    if (state.currentMonitorId === monitorId) {
+      renderMonitorDetail(monitorId);
+    }
+
+    if (btnElement) {
+      btnElement.disabled = false;
+      btnElement.innerHTML = originalBtnText;
+    }
+
+    if (status === 'UP') {
+      showToast(`⚡ Probe succeeded: ${statusCode} OK in ${durationMs} ms`);
+    } else if (status === 'DEGRADED') {
+      showToast(`⚠️ Probe degraded: ${durationMs} ms (exceeds ${threshold} ms threshold)`);
+    } else {
+      showToast(`❌ Probe failed: ${errorMessage || 'Service unreachable'}`);
+    }
+  }
+
+  // Generate 24 hours of simulated realistic checks for a monitor
+  async function seedSampleHistory(monitorId, btnElement = null) {
+    const m = state.monitors.find(mon => mon.id === monitorId);
+    if (!m) return;
+
+    const originalBtnText = btnElement ? btnElement.innerHTML : null;
+    if (btnElement) {
+      btnElement.disabled = true;
+      btnElement.innerHTML = '⏳ Generating…';
+    }
+
+    const now = Date.now();
+    const rows = [];
+    for (let i = 23; i >= 0; i--) {
+      const t = new Date(now - i * 3600000);
+      const baseLat = 150 + Math.floor(Math.sin(i / 3) * 35);
+      const jitter = Math.floor(Math.random() * 55);
+      const lat = Math.max(70, baseLat + jitter);
+
+      rows.push({
+        monitor_id: monitorId,
+        user_id: state.user?.id,
+        checked_at: t.toISOString(),
+        status: 'UP',
+        status_code: 200,
+        response_time_ms: lat,
+        error_message: null,
+        is_retry: false
+      });
+    }
+
+    state.checks = [...rows.slice().reverse(), ...state.checks.filter(c => c.monitor_id !== monitorId)];
+    m.current_status = 'UP';
+    m.last_checked_at = new Date().toISOString();
+
+    if (state.client && state.user) {
+      try {
+        const { error } = await state.client.from('checks').insert(rows);
+        if (error) console.warn('Supabase sample insert:', error.message);
+
+        await state.client.from('monitors').update({
+          current_status: 'UP',
+          last_checked_at: m.last_checked_at,
+          next_check_at: new Date(Date.now() + m.interval_minutes * 60000).toISOString()
+        }).eq('id', monitorId);
+      } catch (err) {
+        console.warn('Sample checks persistence note:', err);
+      }
+    }
+
+    renderOverview();
+    renderMonitors();
+    if (state.currentMonitorId === monitorId) {
+      renderMonitorDetail(monitorId);
+    }
+
+    if (btnElement) {
+      btnElement.disabled = false;
+      btnElement.innerHTML = originalBtnText;
+    }
+
+    showToast('24 hours of dynamic check history generated!');
+  }
+
+  // Wire Detail Action Buttons
+  const pingNowBtn = $('#btn-ping-now');
+  if (pingNowBtn) {
+    pingNowBtn.onclick = () => {
+      if (state.currentMonitorId) triggerManualPing(state.currentMonitorId, pingNowBtn);
+    };
+  }
+
+  const seedBtn = $('#btn-seed-sample');
+  if (seedBtn) {
+    seedBtn.onclick = () => {
+      if (state.currentMonitorId) seedSampleHistory(state.currentMonitorId, seedBtn);
     };
   }
 
@@ -800,7 +1149,7 @@
       return `
         <tr>
           <td class="clk" data-open-detail="${m.id}">
-            <span class="dot ${s.bg}"></span>${escapeHtml(m.name)}
+            <span class="dot ${s.bg}"></span><b>${escapeHtml(m.name || 'Unnamed')}</b>
             <div class="mono" style="display:inline;color:var(--t3);margin-left:10px;font-size:13px">${escapeHtml(host)}</div>
           </td>
           <td><span class="tag">HTTP</span></td>
@@ -809,10 +1158,11 @@
             <span class="mini">
               ${strip.map(b => `<i class="${b.color}"></i>`).join('')}
             </span>
-            <span class="mono">${stats.uptimePct}%</span>
+            <span class="mono">${stats.uptimePct !== null ? stats.uptimePct + '%' : '—'}</span>
           </td>
           <td style="text-align:right">
             <div class="actions-menu">
+              <button class="btn sm p" data-ping="${m.id}" title="Send an immediate keep-alive probe">⚡ Ping</button>
               <button class="btn sm" data-pause="${m.id}">${m.is_paused ? 'Resume' : 'Pause'}</button>
               <button class="btn sm" data-edit="${m.id}">Edit</button>
               <button class="btn sm danger" data-delete="${m.id}">Delete</button>
@@ -830,6 +1180,13 @@
 
   // Monitors Table Actions
   $('#mon-tb').onclick = async e => {
+    const pingBtn = e.target.closest('[data-ping]');
+    if (pingBtn) {
+      const id = pingBtn.dataset.ping;
+      await triggerManualPing(id, pingBtn);
+      return;
+    }
+
     const detailTd = e.target.closest('[data-open-detail]');
     if (detailTd) {
       location.hash = '#overview';

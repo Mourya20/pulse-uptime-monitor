@@ -1,7 +1,6 @@
 // Pulse Configuration
-// Set your Supabase project URL and Publishable Anon Key below,
-// or leave empty to enter them directly via the dashboard settings dialog.
+// Your Supabase project URL is preset below.
 window.PULSE_CONFIG = {
-  supabaseUrl: window.localStorage.getItem('PULSE_SUPABASE_URL') || '',
+  supabaseUrl: window.localStorage.getItem('PULSE_SUPABASE_URL') || 'https://hsvudvpwmygahhxnilnt.supabase.co',
   supabaseAnonKey: window.localStorage.getItem('PULSE_SUPABASE_ANON_KEY') || ''
 };
