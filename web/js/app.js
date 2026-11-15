@@ -829,10 +829,80 @@
     }
   }
 
+  // Live Server-Side Probe
+  // Executes via Cloudflare Pages Function (/api/probe) to avoid client-side CORS issues,
+  // without modifying next_check_at or corrupting the checks table.
+  async function executeLiveProbe(monitorId, btnElement) {
+    const m = state.monitors.find(mon => mon.id === monitorId);
+    if (!m) return;
+
+    const originalText = btnElement ? btnElement.innerHTML : '';
+    if (btnElement) {
+      btnElement.disabled = true;
+      btnElement.innerHTML = 'Testing...';
+    }
+
+    const badge = $('#probe-result');
+    if (badge && state.currentMonitorId === monitorId) {
+      badge.style.display = 'inline-flex';
+      badge.style.borderColor = 'var(--bd)';
+      badge.style.color = 'var(--t2)';
+      badge.textContent = 'Probing...';
+    }
+
+    try {
+      const probeRes = await fetch(`/api/probe?url=${encodeURIComponent(m.url)}`);
+
+      if (!probeRes.ok && probeRes.status === 404) {
+        showToast('⚡ Live probe API is active on Cloudflare Pages. (Scheduled checks run via GitHub Actions Go worker).', 5000);
+        if (badge && state.currentMonitorId === monitorId) badge.style.display = 'none';
+        return;
+      }
+
+      const data = await probeRes.json();
+      if (!data.ok) {
+        showToast(`Probe error: ${data.error || 'Request failed'}`);
+        if (badge && state.currentMonitorId === monitorId) {
+          badge.style.display = 'inline-flex';
+          badge.style.color = 'var(--r)';
+          badge.style.borderColor = 'rgba(255, 68, 68, 0.4)';
+          badge.textContent = `Error: ${data.error || 'Failed'}`;
+        }
+        return;
+      }
+
+      const isUp = data.isHealthy;
+      const statusText = data.statusCode ? `${data.statusCode} ${data.statusText}` : data.statusText;
+      const message = `Server Probe: ${statusText} (${data.latencyMs}ms)`;
+
+      showToast(isUp ? `⚡ ${message}` : `❌ ${message}`);
+
+      if (badge && state.currentMonitorId === monitorId) {
+        badge.style.display = 'inline-flex';
+        badge.style.color = isUp ? 'var(--g)' : 'var(--r)';
+        badge.style.borderColor = isUp ? 'rgba(0, 200, 83, 0.4)' : 'rgba(255, 68, 68, 0.4)';
+        badge.textContent = `${statusText} (${data.latencyMs}ms)`;
+      }
+    } catch (err) {
+      console.warn('Probe request note:', err);
+      showToast('⚡ Live probe is available when hosted on Cloudflare. Scheduled checks run via GitHub Actions Go worker.', 5000);
+      if (badge && state.currentMonitorId === monitorId) {
+        badge.style.display = 'none';
+      }
+    } finally {
+      if (btnElement) {
+        btnElement.disabled = false;
+        btnElement.innerHTML = originalText;
+      }
+    }
+  }
+
   // Open Monitor Detail View
   async function openMonitorDetail(monitorId) {
     state.currentMonitorId = monitorId;
     $('#overview').classList.add('det');
+    const badge = $('#probe-result');
+    if (badge) badge.style.display = 'none';
     renderMonitorDetail(monitorId);
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
@@ -842,6 +912,12 @@
     await loadMonitorHistory(monitorId, rangeMs);
     renderMonitorDetail(monitorId);
   }
+
+  $('#btn-probe')?.addEventListener('click', () => {
+    if (state.currentMonitorId) {
+      executeLiveProbe(state.currentMonitorId, $('#btn-probe'));
+    }
+  });
 
   $('#back').onclick = () => {
     state.currentMonitorId = null;
@@ -1235,6 +1311,7 @@
           </td>
           <td style="text-align:right">
             <div class="actions-menu">
+              <button class="btn sm" data-probe="${m.id}" title="Execute a live server-side reachability probe">⚡ Test</button>
               <button class="btn sm" data-pause="${m.id}">${m.is_paused ? 'Resume' : 'Pause'}</button>
               <button class="btn sm" data-edit="${m.id}">Edit</button>
               <button class="btn sm danger" data-delete="${m.id}">Delete</button>
@@ -1252,6 +1329,13 @@
 
   // Monitors Table Actions
   $('#mon-tb').onclick = async e => {
+    const probeBtn = e.target.closest('[data-probe]');
+    if (probeBtn) {
+      const id = probeBtn.dataset.probe;
+      await executeLiveProbe(id, probeBtn);
+      return;
+    }
+
     const detailTd = e.target.closest('[data-open-detail]');
     if (detailTd) {
       location.hash = '#overview';
