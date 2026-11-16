@@ -38,6 +38,7 @@ jobs:
           cache: true
 
       - name: Run automated unit tests
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         run: go test -v ./...
 
       - name: Build monitoring executable

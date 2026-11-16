@@ -245,29 +245,15 @@ func (d *PgxDB) ProcessIncidentAndStatus(ctx context.Context, m *model.Monitor, 
 			return fmt.Errorf("failed to query active incident: %w", err)
 		}
 	} else if res.Status == model.StatusUp || res.Status == model.StatusDegraded {
-		// Service recovered: resolve any active incident
-		var incidentID string
-		var startedAt time.Time
-
-		err := tx.QueryRow(ctx, `
-			SELECT id, started_at FROM public.incidents
-			WHERE monitor_id = $1 AND resolved_at IS NULL
-			LIMIT 1;
-		`, m.ID).Scan(&incidentID, &startedAt)
-
-		if err == nil {
-			// Found active incident: resolve it
-			updateIncident := `
-				UPDATE public.incidents
-				SET resolved_at = $1::timestamptz,
-				    duration_seconds = GREATEST(0, EXTRACT(EPOCH FROM ($1::timestamptz - started_at))::INT)
-				WHERE id = $2;
-			`
-			if _, err := tx.Exec(ctx, updateIncident, checkedAt, incidentID); err != nil {
-				return fmt.Errorf("failed to resolve active incident: %w", err)
-			}
-		} else if err != pgx.ErrNoRows {
-			return fmt.Errorf("failed querying incident for recovery: %w", err)
+		// Service recovered: resolve any active incident for this monitor
+		updateIncident := `
+			UPDATE public.incidents
+			SET resolved_at = $1::timestamptz,
+			    duration_seconds = GREATEST(0, EXTRACT(EPOCH FROM ($1::timestamptz - started_at))::INT)
+			WHERE monitor_id = $2 AND resolved_at IS NULL;
+		`
+		if _, err := tx.Exec(ctx, updateIncident, checkedAt, m.ID); err != nil {
+			return fmt.Errorf("failed to resolve active incident: %w", err)
 		}
 	}
 

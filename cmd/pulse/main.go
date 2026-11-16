@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -16,7 +17,18 @@ import (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.Println("[Pulse] Keep-Alive & Uptime Monitor starting...")
+
+	daemonFlag := flag.Bool("daemon", false, "Run continuously as a persistent background daemon")
+	flag.BoolVar(daemonFlag, "d", false, "Run continuously as a persistent background daemon (shorthand)")
+	intervalFlag := flag.Duration("interval", 1*time.Minute, "Polling interval between cycles in daemon mode")
+	flag.Parse()
+
+	isDaemon := *daemonFlag || os.Getenv("PULSE_DAEMON") == "true"
+	if isDaemon {
+		log.Printf("[Pulse] Keep-Alive & Uptime Monitor starting in continuous DAEMON mode (cycle interval: %v)...\n", *intervalFlag)
+	} else {
+		log.Println("[Pulse] Keep-Alive & Uptime Monitor starting (single-cycle runner mode)...")
+	}
 
 	// 1. Load configuration
 	cfg, err := config.LoadFromEnv()
@@ -39,15 +51,37 @@ func main() {
 	chk := checker.NewChecker()
 	eng := engine.NewEngine(cfg, dbPool, chk)
 
-	// 5. Execute scheduled monitoring cycle with 4-minute timeout buffer
-	// (Guarantees clean completion before GitHub Actions 5-minute timeout)
-	cycleCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
-	defer cancel()
+	// Single cycle execution helper
+	runCycle := func() {
+		cycleCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+		defer cancel()
 
-	runStart := time.Now()
-	if err := eng.Run(cycleCtx); err != nil {
-		log.Fatalf("[Pulse] Monitoring cycle finished with errors: %v (elapsed: %v)\n", err, time.Since(runStart))
+		runStart := time.Now()
+		if err := eng.Run(cycleCtx); err != nil && ctx.Err() == nil {
+			log.Printf("[Pulse] Monitoring cycle finished with errors: %v (elapsed: %v)\n", err, time.Since(runStart))
+		} else {
+			log.Printf("[Pulse] Monitoring cycle completed successfully in %v.\n", time.Since(runStart))
+		}
 	}
 
-	log.Printf("[Pulse] Monitoring cycle completed successfully in %v.\n", time.Since(runStart))
+	// 5. Execute monitoring
+	runCycle()
+
+	if !isDaemon {
+		return
+	}
+
+	// In daemon mode, loop continuously every interval
+	ticker := time.NewTicker(*intervalFlag)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[Pulse] Shutdown signal received. Exiting daemon cleanly.")
+			return
+		case <-ticker.C:
+			runCycle()
+		}
+	}
 }

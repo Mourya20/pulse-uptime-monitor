@@ -220,14 +220,25 @@
     const relevantIncidents = state.incidents.filter(inc => {
       if (inc.monitor_id !== monitorId) return false;
       const s = new Date(inc.started_at).getTime();
-      const e = inc.resolved_at ? new Date(inc.resolved_at).getTime() : now;
+      let e = inc.resolved_at ? new Date(inc.resolved_at).getTime() : now;
+      if (!inc.resolved_at && (m.current_status === 'UP' || m.current_status === 'DEGRADED') && m.last_checked_at) {
+        const lastCheckMs = new Date(m.last_checked_at).getTime();
+        if (lastCheckMs > s) e = lastCheckMs;
+      }
       return e > windowStart && s < now;
     });
 
-    const rawIncRanges = relevantIncidents.map(inc => [
-      Math.max(windowStart, new Date(inc.started_at).getTime()),
-      Math.min(now, inc.resolved_at ? new Date(inc.resolved_at).getTime() : now)
-    ]).filter(([s, e]) => e > s);
+    const rawIncRanges = relevantIncidents.map(inc => {
+      const s = Math.max(windowStart, new Date(inc.started_at).getTime());
+      let endMs = now;
+      if (inc.resolved_at) {
+        endMs = new Date(inc.resolved_at).getTime();
+      } else if ((m.current_status === 'UP' || m.current_status === 'DEGRADED') && m.last_checked_at) {
+        const lastCheckMs = new Date(m.last_checked_at).getTime();
+        if (lastCheckMs > s) endMs = lastCheckMs;
+      }
+      return [s, Math.min(now, endMs)];
+    }).filter(([s, e]) => e > s);
 
     const mergedIncRanges = mergeIntervals(rawIncRanges);
     // Exclude maintenance overlap from downtime (planned maintenance is never outage downtime)
@@ -235,15 +246,12 @@
     const totalDownMs = sumIntervals(effectiveDownRanges);
 
     // 3. Observed checks within the window
-    const intervalMs = (m.interval_minutes || 5) * 60 * 1000;
-    const graceMs = ((m.interval_minutes || 5) * 2 + 10) * 60 * 1000;
-
     const monChecks = state.checks
       .filter(c => c.monitor_id === monitorId && c.checked_at)
       .sort((a, b) => new Date(a.checked_at).getTime() - new Date(b.checked_at).getTime());
 
     // If no checks ever recorded and never checked
-    if (monChecks.length === 0 && !m.last_checked_at) {
+    if (monChecks.length === 0 && !m.last_checked_at && relevantIncidents.length === 0) {
       return {
         uptimePct: null,
         downSec: 0,
@@ -256,54 +264,8 @@
       };
     }
 
-    // 4. Identify unobserved / unknown periods
-    const unobservedRanges = [];
-
-    if (monChecks.length === 0) {
-      if (m.last_checked_at) {
-        const lastT = new Date(m.last_checked_at).getTime();
-        if (now - lastT > graceMs) {
-          unobservedRanges.push([Math.max(windowStart, lastT + intervalMs), now]);
-        }
-      } else {
-        unobservedRanges.push([windowStart, now]);
-      }
-    } else {
-      // Gap from windowStart to first check
-      const firstCheckT = new Date(monChecks[0].checked_at).getTime();
-      if (firstCheckT - windowStart > graceMs) {
-        unobservedRanges.push([windowStart, Math.min(now, firstCheckT)]);
-      }
-
-      // Gaps between consecutive checks
-      for (let i = 0; i < monChecks.length - 1; i++) {
-        const t1 = new Date(monChecks[i].checked_at).getTime();
-        const t2 = new Date(monChecks[i + 1].checked_at).getTime();
-        if (t2 - t1 > graceMs) {
-          const gapStart = Math.max(windowStart, t1 + intervalMs);
-          const gapEnd = Math.min(now, t2);
-          if (gapEnd > gapStart) {
-            unobservedRanges.push([gapStart, gapEnd]);
-          }
-        }
-      }
-
-      // Gap from last check to now
-      const lastCheckT = new Date(monChecks[monChecks.length - 1].checked_at).getTime();
-      if (now - lastCheckT > graceMs) {
-        const gapStart = Math.max(windowStart, lastCheckT + intervalMs);
-        if (now > gapStart) {
-          unobservedRanges.push([gapStart, now]);
-        }
-      }
-    }
-
-    const mergedUnknown = mergeIntervals(unobservedRanges);
-    const effectiveUnknown = subtractIntervals(mergedUnknown, mergedMaint);
-    const totalUnknownMs = sumIntervals(effectiveUnknown);
-
-    // Monitored duration excludes maintenance and unobserved periods
-    const effectiveMonitoredMs = Math.max(0, windowDuration - totalMaintMs - totalUnknownMs);
+    // Monitored duration excludes scheduled maintenance periods
+    const effectiveMonitoredMs = Math.max(0, windowDuration - totalMaintMs);
 
     if (effectiveMonitoredMs <= 0) {
       return {
@@ -320,7 +282,7 @@
 
     const clampedDownMs = Math.min(effectiveMonitoredMs, totalDownMs);
     const upMs = Math.max(0, effectiveMonitoredMs - clampedDownMs);
-    const uptimePct = Math.round(((upMs / effectiveMonitoredMs) * 100) * 100) / 100;
+    const uptimePct = Math.round(((upMs / effectiveMonitoredMs) * 100) * 1000) / 1000;
 
     // MTBF calculation
     let mtbfHours = -1;
@@ -620,12 +582,34 @@
     }
   };
 
+  // Active in-flight auto-probe tracker
+  state.activeAutoProbes = new Set();
+
+  // Self-checker: automatically probe any monitor that is due or overdue
+  async function checkDueMonitors() {
+    if (!state.client || !state.user || !state.monitors || state.monitors.length === 0) return;
+    const nowMs = Date.now();
+    for (const m of state.monitors) {
+      if (m.is_paused) continue;
+      const nextMs = m.next_check_at ? new Date(m.next_check_at).getTime() : 0;
+      // If due or overdue, trigger auto-check
+      if (nowMs >= nextMs && !state.activeAutoProbes.has(m.id)) {
+        state.activeAutoProbes.add(m.id);
+        executeLiveProbe(m.id, null, true).finally(() => {
+          state.activeAutoProbes.delete(m.id);
+        });
+      }
+    }
+  }
+
   // Periodic polling of the database to refresh dashboard
   function startPolling() {
     if (state.pollInterval) clearInterval(state.pollInterval);
     state.pollInterval = setInterval(async () => {
       if (state.client && state.user) {
         await loadAllData(true);
+        // Automatically check any due monitors on poll cycle
+        checkDueMonitors();
       }
     }, 15000); // Live poll every 15s
 
@@ -653,13 +637,8 @@
               const sec = diffSec % 60;
               intervalEl.textContent = `Next in ${min}m ${sec < 10 ? '0' : ''}${sec}s (every ${m.interval_minutes}m)`;
             } else {
-              const overdueSec = Math.abs(diffSec);
-              if (overdueSec > 60) {
-                const overMin = Math.floor(overdueSec / 60);
-                intervalEl.textContent = `Awaiting runner · Overdue by ${overMin}m (every ${m.interval_minutes}m)`;
-              } else {
-                intervalEl.textContent = `Checking soon… (every ${m.interval_minutes}m)`;
-              }
+              intervalEl.textContent = `Probing now… (every ${m.interval_minutes}m)`;
+              checkDueMonitors();
             }
           }
         }
@@ -896,8 +875,8 @@
 
   // Live Server-Side Probe
   // Executes via Cloudflare Pages Function (/api/probe) to avoid client-side CORS issues,
-  // without modifying next_check_at or corrupting the checks table.
-  async function executeLiveProbe(monitorId, btnElement) {
+  // syncs results with Supabase database, and updates incidents/monitors.
+  async function executeLiveProbe(monitorId, btnElement, silent = false) {
     const m = state.monitors.find(mon => mon.id === monitorId);
     if (!m) return;
 
@@ -908,7 +887,7 @@
     }
 
     const badge = $('#probe-result');
-    if (badge && state.currentMonitorId === monitorId) {
+    if (badge && state.currentMonitorId === monitorId && !silent) {
       badge.style.display = 'inline-flex';
       badge.style.borderColor = 'var(--bd)';
       badge.style.color = 'var(--t2)';
@@ -919,14 +898,14 @@
       const probeRes = await fetch(`/api/probe?url=${encodeURIComponent(m.url)}`);
 
       if (!probeRes.ok && probeRes.status === 404) {
-        showToast('⚡ Live probe API is active on Cloudflare Pages. (Scheduled checks run via GitHub Actions Go worker).', 5000);
+        if (!silent) showToast('⚡ Live probe API is active on Cloudflare Pages. (Scheduled checks run via GitHub Actions Go worker).', 5000);
         if (badge && state.currentMonitorId === monitorId) badge.style.display = 'none';
         return;
       }
 
       const data = await probeRes.json();
       if (!data.ok) {
-        showToast(`Probe error: ${data.error || 'Request failed'}`);
+        if (!silent) showToast(`Probe error: ${data.error || 'Request failed'}`);
         if (badge && state.currentMonitorId === monitorId) {
           badge.style.display = 'inline-flex';
           badge.style.color = 'var(--r)';
@@ -940,7 +919,9 @@
       const statusText = data.statusCode ? `${data.statusCode} ${data.statusText}` : data.statusText;
       const message = `Server Probe: ${statusText} (${data.latencyMs}ms)`;
 
-      showToast(isUp ? `⚡ ${message}` : `❌ ${message}`);
+      if (!silent) {
+        showToast(isUp ? `⚡ ${message}` : `❌ ${message}`);
+      }
 
       if (badge && state.currentMonitorId === monitorId) {
         badge.style.display = 'inline-flex';
@@ -970,16 +951,63 @@
             is_retry: false
           });
 
-          // 2. If recovered to UP/DEGRADED, resolve any active incident
+          // 2. Incident handling
           if (isUp) {
-            const activeInc = state.incidents.find(inc => inc.monitor_id === m.id && !inc.resolved_at);
-            if (activeInc) {
-              const startMs = new Date(activeInc.started_at).getTime();
-              const durSec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
-              await state.client.from('incidents').update({
-                resolved_at: checkedAt,
-                duration_seconds: durSec
-              }).eq('id', activeInc.id);
+            try {
+              // Resolve active outages in remote database
+              const { data: openIncs } = await state.client
+                .from('incidents')
+                .select('id, started_at')
+                .eq('monitor_id', m.id)
+                .is('resolved_at', null);
+
+              if (openIncs && openIncs.length > 0) {
+                for (const inc of openIncs) {
+                  const startMs = new Date(inc.started_at).getTime();
+                  const durSec = Math.max(0, Math.floor((new Date(checkedAt).getTime() - startMs) / 1000));
+                  await state.client.from('incidents').update({
+                    resolved_at: checkedAt,
+                    duration_seconds: durSec
+                  }).eq('id', inc.id);
+                }
+              }
+            } catch (incErr) {
+              console.warn('Error resolving active incidents in database:', incErr);
+            }
+
+            // Also update local in-memory incidents state
+            state.incidents.forEach(inc => {
+              if (inc.monitor_id === m.id && !inc.resolved_at) {
+                inc.resolved_at = checkedAt;
+                const startMs = new Date(inc.started_at).getTime();
+                inc.duration_seconds = Math.max(0, Math.floor((new Date(checkedAt).getTime() - startMs) / 1000));
+              }
+            });
+          } else {
+            // Outage detected: open incident if none active
+            try {
+              const { data: openIncs } = await state.client
+                .from('incidents')
+                .select('id')
+                .eq('monitor_id', m.id)
+                .is('resolved_at', null);
+
+              if (!openIncs || openIncs.length === 0) {
+                const rootCause = data.statusCode ? `${data.statusCode} ${data.statusText}` : (data.statusText || 'Connection timeout');
+                const { data: newInc } = await state.client.from('incidents').insert({
+                  monitor_id: m.id,
+                  user_id: state.user.id,
+                  started_at: checkedAt,
+                  root_cause: rootCause,
+                  http_status: data.statusCode || null,
+                  error_details: data.error || data.statusText || null
+                }).select();
+                if (newInc && newInc.length > 0) {
+                  state.incidents.unshift(newInc[0]);
+                }
+              }
+            } catch (outageErr) {
+              console.warn('Error recording active outage incident:', outageErr);
             }
           }
 
@@ -1161,12 +1189,12 @@
 
     setMetricCol($('#d-7d'), s7d.uptimePct);
     $('#d-7d-inc').textContent = s7d.hasData !== false
-      ? `${s7d.incidentCount} incident${s7d.incidentCount === 1 ? '' : 's'}`
+      ? `${s7d.incidentCount} incident${s7d.incidentCount === 1 ? '' : 's'}, ${formatDuration(s7d.downSec)} down`
       : 'No checks yet';
 
     setMetricCol($('#d-30d'), s30d.uptimePct);
     $('#d-30d-down').textContent = s30d.hasData !== false
-      ? `${formatDuration(s30d.downSec)} down`
+      ? `${s30d.incidentCount} incident${s30d.incidentCount === 1 ? '' : 's'}, ${formatDuration(s30d.downSec)} down`
       : 'No checks yet';
 
     $('#d-365d').textContent = (s365d.hasData !== false && s365d.uptimePct !== null) ? `${s365d.uptimePct}%` : '—';
@@ -1245,13 +1273,36 @@
       .sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
 
     let continuousUpStart = 0;
-    if (monIncidents.length > 0 && monIncidents[0].resolved_at) {
-      continuousUpStart = new Date(monIncidents[0].resolved_at).getTime();
+    if (monIncidents.length > 0) {
+      if (monIncidents[0].resolved_at) {
+        continuousUpStart = new Date(monIncidents[0].resolved_at).getTime();
+      } else {
+        // If an incident was active but the server is now UP, it recovered at the last probe!
+        continuousUpStart = monitor.last_checked_at ? new Date(monitor.last_checked_at).getTime() : Date.now();
+      }
+    }
+
+    // Also inspect probe checks to detect recovery even if an incident record wasn't updated
+    const monChecks = state.checks
+      .filter(c => c.monitor_id === monitor.id)
+      .sort((a, b) => new Date(b.checked_at).getTime() - new Date(a.checked_at).getTime());
+
+    const lastDownCheck = monChecks.find(c => c.status === 'DOWN');
+    if (lastDownCheck) {
+      const downCheckTime = new Date(lastDownCheck.checked_at).getTime();
+      if (downCheckTime > continuousUpStart) {
+        const firstUpAfter = monChecks
+          .filter(c => (c.status === 'UP' || c.status === 'DEGRADED') && new Date(c.checked_at).getTime() > downCheckTime)
+          .sort((a, b) => new Date(a.checked_at).getTime() - new Date(b.checked_at).getTime())[0];
+
+        continuousUpStart = firstUpAfter
+          ? new Date(firstUpAfter.checked_at).getTime()
+          : (monitor.last_checked_at ? new Date(monitor.last_checked_at).getTime() : Date.now());
+      }
     }
 
     if (!continuousUpStart || isNaN(continuousUpStart)) {
-      // No prior incident: calculate from monitor creation or earliest check
-      const monChecks = state.checks.filter(c => c.monitor_id === monitor.id);
+      // No prior incident or downtime: calculate from monitor creation or earliest check
       const checkTimes = monChecks
         .map(c => new Date(c.checked_at).getTime())
         .filter(t => !isNaN(t) && t > 0);
